@@ -53,15 +53,7 @@ Receiver action is still an intercept choice:
 
 ## Shuttle Dynamics
 
-Default mode is ballistic:
-
-```text
-x(t) = x0 + v_x t
-y(t) = y0 + v_y t
-z(t) = z0 + v_z t - 0.5 g t^2
-```
-
-The latest training runs use square drag (`drag_square`, with `drag` kept as a compatibility alias). In that mode, the shuttle is integrated numerically with speed-dependent drag:
+Default shuttle dynamics use square drag (`drag_square`, with `drag` kept as a compatibility alias). The shuttle is integrated numerically with speed-dependent drag:
 
 ```text
 speed = sqrt(v_x^2 + v_y^2 + v_z^2)
@@ -351,10 +343,6 @@ Rules used by that defensive curriculum:
 ## Example Self-Play Video
 
 April 20, 2026 mirror-self checkpoint match from the defensive curriculum run:
-
-<video src="https://raw.githubusercontent.com/pd2714/RL_badminton/main/outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4" controls muted playsinline width="100%"></video>
-
-If GitHub does not render the inline player for your browser, use the preview GIF or direct file link below:
 
 [![Mirror self-play match preview](outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.gif)](https://raw.githubusercontent.com/pd2714/RL_badminton/main/outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4)
 
