@@ -61,7 +61,19 @@ y(t) = y0 + v_y t
 z(t) = z0 + v_z t - 0.5 g t^2
 ```
 
-Optional square-drag mode is supported via `drag_square` (with `drag` kept as a compatibility alias).
+The latest training runs use square drag (`drag_square`, with `drag` kept as a compatibility alias). In that mode, the shuttle is integrated numerically with speed-dependent drag:
+
+```text
+speed = sqrt(v_x^2 + v_y^2 + v_z^2)
+dx/dt = v_x
+dy/dt = v_y
+dz/dt = v_z
+dv_x/dt = -k_h * speed * v_x
+dv_y/dt = -k_h * speed * v_y
+dv_z/dt = -g - k_v * speed * v_z
+```
+
+using `k_h = horizontal_drag_coefficient`, `k_v = vertical_drag_coefficient`, and the simulator time step `drag_dt = 0.01`.
 
 The latest RL runs in this repo use:
 
@@ -340,9 +352,13 @@ Rules used by that defensive curriculum:
 
 April 20, 2026 mirror-self checkpoint match from the defensive curriculum run:
 
-[![Mirror self-play match preview](outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.gif)](outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4)
+<video src="https://raw.githubusercontent.com/pd2714/RL_badminton/main/outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4" controls muted playsinline width="100%"></video>
 
-Direct MP4: [outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4](outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4)
+If GitHub does not render the inline player for your browser, use the preview GIF or direct file link below:
+
+[![Mirror self-play match preview](outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.gif)](https://raw.githubusercontent.com/pd2714/RL_badminton/main/outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4)
+
+Direct MP4: [match.mp4](https://raw.githubusercontent.com/pd2714/RL_badminton/main/outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4)
 
 Export rally sequence video:
 
