@@ -63,6 +63,14 @@ z(t) = z0 + v_z t - 0.5 g t^2
 
 Optional square-drag mode is supported via `drag_square` (with `drag` kept as a compatibility alias).
 
+The latest RL runs in this repo use:
+
+- `trajectory_mode=drag_square`
+- `horizontal_drag_coefficient=0.2`
+- `vertical_drag_coefficient=0.16`
+- `intercept_count=50`
+- `court-mode 1d` for the April 2026 self-play and defense-curriculum checkpoints
+
 Clean helpers are available in `badminton1d/trajectory.py` and `badminton1d/dynamics.py` for:
 
 - landing time
@@ -106,6 +114,8 @@ z_min <= z(t) <= z_max
 ```
 
 If no feasible intercept exists, the hitter wins the rally.
+
+In the RL environment, an invalid receiver discrete action is also treated as an immediate loss when `invalid_receiver_choice_loses=True` (the current default).
 
 When an intercept is chosen:
 
@@ -229,6 +239,20 @@ python3 scripts/demo_trajectory_slider.py \
 
 ## PPO Training
 
+Current PPO defaults in `scripts/train_ppo.py` are tuned around the drag-square trajectory model and the latest self-play protocol:
+
+- `trajectory_mode=drag_square`
+- `reaction_time=0.3`
+- `player_speed=2.6`
+- `intercept_count=50`
+- `mirror_match_fraction=0.25`
+- `loop_penalty=0.03` with `loop_window=4`
+- `pressure_reward_weight=0.05`
+- `max_rally_stages=120`
+- `n_envs=8`
+- `initial_server=random`
+- `stage_penalty=0.0` and `stall_penalty=0.0` by default
+
 Train PPO against the heuristic opponent:
 
 ```bash
@@ -253,17 +277,21 @@ python3 scripts/train_selfplay.py \
   --base-checkpoint-path outputs/rl/ppo_run/final_model.zip
 ```
 
-The self-play trainer now defaults to:
+The self-play trainer in `scripts/train_selfplay.py` now defaults to:
 
-- drawing opponents from a pool of past selves with recency-weighted sampling
-- mixing in the safe heuristic opponent with a small probability
-- saving checkpoints every `1000` timesteps
-- evaluating only `current_vs_newest_checkpoint` during training for faster benchmark feedback
-- mirroring the train side for `25%` of episodes unless overridden with `--mirror-match-fraction`
-- applying a small per-stage penalty plus an extra late-rally stall penalty to discourage oscillatory loops
+- drawing opponents from a checkpoint pool with `recency` sampling
+- using `checkpoint_recency_power=3.0`
+- weighting recent vs older checkpoints `0.9 / 0.1`
+- mixing in the safe heuristic opponent with probability `0.05`
+- saving checkpoint-pool snapshots every `2000` timesteps
+- evaluating `current_vs_newest_checkpoint` every `5000` timesteps by default
+- keeping mirror-side training active for `25%` of episodes unless overridden with `--mirror-match-fraction`
+- using `drag_square`, `reaction_time=0.3`, `player_speed=2.6`, and `intercept_count=50`
+- capping rallies at `120` stages with `max_rally_penalty=1.0`
+- using loop-penalty shaping (`0.03`, window `4`) plus pressure reward (`0.05`)
+- leaving `stage_penalty` and `stall_penalty` off by default unless explicitly enabled
 - not recording training-progress videos unless `--progress-video-freq` is enabled
-- using a slightly faster default shuttle forward-speed range
-- using the side-view 1D visualization for 1D-court videos
+- using the side-view 1D visualization when `--court-mode 1d` is selected
 
 Retrain for the 1D court:
 
@@ -293,6 +321,28 @@ That preset:
 - starts rallies from a non-serve back-court attack state with the opponent as the hitter
 - samples the opponent's opening attack stochastically while keeping its defensive responses deterministic
 - widens the attacker position, defender displacement, and contact height over curriculum phases
+
+The curriculum phases currently used are:
+
+- `stabilize_center_lane` from episode `0`
+- `expand_attack_angles` from episode `1500`
+- `full_backcourt_pressure` from episode `4500`
+
+Rules used by that defensive curriculum:
+
+- every episode starts from a randomized mid-rally back-court attack instead of a normal serve
+- the opponent is forced to be the initial hitter and initial server
+- opening attack locations and contact heights are sampled from phase-specific ranges
+- the opponent's hitter policy stays stochastic, but its defensive receiver choice is deterministic
+- the defender must still satisfy the normal intercept-feasibility, net-clearance, and in-bounds rules
+
+## Example Self-Play Video
+
+April 20, 2026 mirror-self checkpoint match from the defensive curriculum run:
+
+[![Mirror self-play match preview](outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.gif)](outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4)
+
+Direct MP4: [outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4](outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k/videos/mirror_self_5pt_200k_20260420/match.mp4)
 
 Export rally sequence video:
 

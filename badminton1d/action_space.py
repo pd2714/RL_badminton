@@ -147,8 +147,19 @@ class DiscreteActionMapper:
             validated = validate_and_clip_shot_action(state, clipped, self.config)
             if self._is_legal_serve_action(state, validated.applied):
                 return ProjectedHitterAction(shot_action=validated.applied, projected=not self._actions_close(shot_action, validated.applied))
+            if state.stage_index == 0:
+                from badminton1d.agents import SafeHitter
+
+                safe_action = SafeHitter().choose_action(state, self.config)
+                safe_validated = validate_and_clip_shot_action(state, safe_action, self.config)
+                return ProjectedHitterAction(shot_action=safe_validated.applied, projected=True)
         except ValueError:
-            pass
+            if state.stage_index == 0:
+                from badminton1d.agents import SafeHitter
+
+                safe_action = SafeHitter().choose_action(state, self.config)
+                safe_validated = validate_and_clip_shot_action(state, safe_action, self.config)
+                return ProjectedHitterAction(shot_action=safe_validated.applied, projected=True)
 
         vx_low, vx_high = self._vx_range()
         vx_grid = np.linspace(vx_low, vx_high, self._effective_v_x_bins)
