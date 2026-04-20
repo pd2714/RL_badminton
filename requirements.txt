@@ -1,0 +1,6 @@
+numpy
+matplotlib
+imageio
+gymnasium
+stable-baselines3
+tensorboard
