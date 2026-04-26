@@ -1,4 +1,4 @@
-# Badminton 2D Court Simulator
+# Reinforcement Learning trained badminton agents
 
 This repo keeps the original stage-based badminton simulator structure, but the simulator itself is now a true 2D court model built in the existing `badminton1d` package.
 
