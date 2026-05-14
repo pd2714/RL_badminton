@@ -14,8 +14,11 @@ from badminton1d.playback import build_rally_trace
 from badminton1d.state import ShotAction, StageState
 from badminton1d.video import (
     TrainingProgressSample,
+    _draw_backline_markers_side_view,
     _draw_service_markers_side_view,
     _resolve_view,
+    _shot_speed_text,
+    _shot_type_text,
     export_training_progress_video,
 )
 
@@ -87,6 +90,42 @@ class TrainingProgressVideoTests(unittest.TestCase):
     def test_auto_view_uses_rotated_3d_view_for_two_dimensional_court(self) -> None:
         self.assertEqual(_resolve_view(self.config, "auto"), "3d")
 
+    def test_shot_type_text_uses_velocity_shot_naming(self) -> None:
+        state = StageState(
+            x_left=0.0,
+            y_left=-5.0,
+            x_right=0.0,
+            y_right=5.0,
+            current_hitter="left",
+            x0=0.0,
+            y0=-5.0,
+            z0=1.7,
+            stage_index=0,
+        )
+        action = ShotAction(v_x=0.0, v_y=6.0, v_z=5.0, x_rec=0.0, y_rec=-4.0)
+        record = step_stage(state, action, intercept_index=None, config=self.config)
+        trace = build_rally_trace([record], self.config)
+
+        self.assertEqual(_shot_type_text(trace.stages[0], self.config), "shot drop")
+
+    def test_shot_speed_text_uses_launch_velocity_magnitude(self) -> None:
+        state = StageState(
+            x_left=0.0,
+            y_left=-5.0,
+            x_right=0.0,
+            y_right=5.0,
+            current_hitter="left",
+            x0=0.0,
+            y0=-5.0,
+            z0=1.7,
+            stage_index=0,
+        )
+        action = ShotAction(v_x=0.0, v_y=6.0, v_z=5.0, x_rec=0.0, y_rec=-4.0)
+        record = step_stage(state, action, intercept_index=None, config=self.config)
+        trace = build_rally_trace([record], self.config)
+
+        self.assertEqual(_shot_speed_text(trace.stages[0]), "speed 7.8 m/s")
+
     def test_one_dimensional_side_view_uses_short_service_markers(self) -> None:
         config = SimulationConfig(court=type(self.config.court)(mode="1d"))
         fig, ax = plt.subplots()
@@ -99,6 +138,21 @@ class TrainingProgressVideoTests(unittest.TestCase):
                 self.assertEqual(line.get_linestyle(), "-")
                 self.assertGreater(float(line.get_ydata()[1]), 0.0)
                 self.assertLess(float(line.get_ydata()[1]), config.court.net_height)
+        finally:
+            plt.close(fig)
+
+    def test_one_dimensional_side_view_uses_backline_markers(self) -> None:
+        config = SimulationConfig(court=type(self.config.court)(mode="1d"))
+        fig, ax = plt.subplots()
+        try:
+            _draw_backline_markers_side_view(ax, config, {"court_line": "black"})
+            backline_markers = [line for line in ax.lines if np.allclose(np.diff(line.get_xdata()), 0.0)]
+
+            self.assertEqual(len(backline_markers), 2)
+            x_positions = sorted(float(line.get_xdata()[0]) for line in backline_markers)
+            self.assertEqual(x_positions, [-config.court.half_length, config.court.half_length])
+            for line in backline_markers:
+                self.assertGreater(float(line.get_ydata()[1]), 0.0)
         finally:
             plt.close(fig)
 

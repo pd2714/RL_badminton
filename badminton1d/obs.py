@@ -7,6 +7,7 @@ import numpy as np
 from badminton1d.config import SimulationConfig
 from badminton1d.dynamics import landing_position
 from badminton1d.state import ShotAction, Side, StageState
+from badminton1d.utils import canonicalize_shot_action_for_agent, canonicalize_state_for_agent, side_to_agent_canonical
 
 
 @dataclass(frozen=True)
@@ -29,24 +30,25 @@ class ObservationEncoder:
     def size(self) -> int:
         base = 18
         pending = 11
+        movement = 4
         mask = self.config.action.intercept_count if self.observation_config.include_feasible_mask else 0
-        return base + pending + mask
+        return base + pending + movement + mask
 
     def feature_names(self) -> list[str]:
         names = [
-            "x_left",
-            "y_left",
-            "x_right",
-            "y_right",
+            "x_agent",
+            "y_agent",
+            "x_opponent",
+            "y_opponent",
             "x0",
             "y0",
             "z0",
-            "current_hitter_left",
-            "current_hitter_right",
-            "server_left",
-            "server_right",
-            "agent_left",
-            "agent_right",
+            "current_hitter_agent",
+            "current_hitter_opponent",
+            "server_agent",
+            "server_opponent",
+            "agent_canonical_left",
+            "opponent_canonical_right",
             "role_is_hitter",
             "role_is_receiver",
             "score_left",
@@ -63,6 +65,10 @@ class ObservationEncoder:
             "pending_landing_y",
             "pending_landing_dx",
             "pending_landing_dy",
+            "v_x_agent",
+            "v_y_agent",
+            "v_x_opponent",
+            "v_y_opponent",
         ]
         if self.observation_config.include_feasible_mask:
             names.extend(f"feasible_intercept_{index}" for index in range(self.config.action.intercept_count))
@@ -81,6 +87,14 @@ class ObservationEncoder:
         feasible_indices: list[int] | None = None,
     ) -> np.ndarray:
         feasible_indices = feasible_indices or []
+        canonical_state = canonicalize_state_for_agent(state, agent_side)
+        canonical_server_side = side_to_agent_canonical(server_side, agent_side)
+        canonical_pending_action = (
+            None if pending_action is None else canonicalize_shot_action_for_agent(pending_action, agent_side)
+        )
+        if agent_side == "right":
+            score_left, score_right = score_right, score_left
+
         is_hitter = 1.0 if role == "hitter" else 0.0
         mask = np.zeros(self.config.action.intercept_count, dtype=np.float32)
         if self.observation_config.include_feasible_mask:
@@ -91,8 +105,8 @@ class ObservationEncoder:
         pending_active = 1.0 if pending_action is not None else 0.0
         landing_x = 0.0
         landing_y = 0.0
-        if pending_action is not None:
-            landing_x, landing_y = landing_position(state, pending_action, self.config)
+        if canonical_pending_action is not None:
+            landing_x, landing_y = landing_position(canonical_state, canonical_pending_action, self.config)
 
         max_velocity = max(
             abs(self.config.action.vx_min),
@@ -102,39 +116,43 @@ class ObservationEncoder:
             self.config.action.vz_max,
         )
         features = [
-            self._normalize_x(state.x_left),
-            self._normalize_y(state.y_left),
-            self._normalize_x(state.x_right),
-            self._normalize_y(state.y_right),
-            self._normalize_x(state.x0),
-            self._normalize_y(state.y0),
-            self._normalize_unit(state.z0, 0.0, self.config.render.z_max),
-            1.0 if state.current_hitter == "left" else 0.0,
-            1.0 if state.current_hitter == "right" else 0.0,
-            1.0 if server_side == "left" else 0.0,
-            1.0 if server_side == "right" else 0.0,
-            1.0 if agent_side == "left" else 0.0,
-            1.0 if agent_side == "right" else 0.0,
+            self._normalize_x(canonical_state.x_left),
+            self._normalize_y(canonical_state.y_left),
+            self._normalize_x(canonical_state.x_right),
+            self._normalize_y(canonical_state.y_right),
+            self._normalize_x(canonical_state.x0),
+            self._normalize_y(canonical_state.y0),
+            self._normalize_unit(canonical_state.z0, 0.0, self.config.render.z_max),
+            1.0 if canonical_state.current_hitter == "left" else 0.0,
+            1.0 if canonical_state.current_hitter == "right" else 0.0,
+            1.0 if canonical_server_side == "left" else 0.0,
+            1.0 if canonical_server_side == "right" else 0.0,
+            1.0,
+            0.0,
             is_hitter,
             1.0 - is_hitter,
             self._normalize_unit(score_left, 0.0, max(float(self.observation_config.max_score), 1.0)),
             self._normalize_unit(score_right, 0.0, max(float(self.observation_config.max_score), 1.0)),
             self._normalize_unit(
-                state.stage_index,
+                canonical_state.stage_index,
                 0.0,
                 max(float(self.observation_config.max_stages_per_rally), 1.0),
             ),
             pending_active,
             float(len(feasible_indices)) / max(float(self.config.action.intercept_count), 1.0),
-            self._normalize_signed(pending_action.v_x, max_velocity) if pending_action else 0.0,
-            self._normalize_signed(pending_action.v_y, max_velocity) if pending_action else 0.0,
-            self._normalize_signed(pending_action.v_z, max_velocity) if pending_action else 0.0,
-            self._normalize_x(pending_action.x_rec) if pending_action else 0.0,
-            self._normalize_y(pending_action.y_rec) if pending_action else 0.0,
-            self._normalize_x(landing_x) if pending_action else 0.0,
-            self._normalize_y(landing_y) if pending_action else 0.0,
-            self._normalize_signed(landing_x - state.x0, self.config.court.width) if pending_action else 0.0,
-            self._normalize_signed(landing_y - state.y0, self.config.court.length) if pending_action else 0.0,
+            self._normalize_signed(canonical_pending_action.v_x, max_velocity) if canonical_pending_action else 0.0,
+            self._normalize_signed(canonical_pending_action.v_y, max_velocity) if canonical_pending_action else 0.0,
+            self._normalize_signed(canonical_pending_action.v_z, max_velocity) if canonical_pending_action else 0.0,
+            self._normalize_x(canonical_pending_action.x_rec) if canonical_pending_action else 0.0,
+            self._normalize_y(canonical_pending_action.y_rec) if canonical_pending_action else 0.0,
+            self._normalize_x(landing_x) if canonical_pending_action else 0.0,
+            self._normalize_y(landing_y) if canonical_pending_action else 0.0,
+            self._normalize_signed(landing_x - canonical_state.x0, self.config.court.width) if canonical_pending_action else 0.0,
+            self._normalize_signed(landing_y - canonical_state.y0, self.config.court.length) if canonical_pending_action else 0.0,
+            self._normalize_signed(canonical_state.v_x_left, self.config.player.v_max),
+            self._normalize_signed(canonical_state.v_y_left, self.config.player.v_max),
+            self._normalize_signed(canonical_state.v_x_right, self.config.player.v_max),
+            self._normalize_signed(canonical_state.v_y_right, self.config.player.v_max),
         ]
         if self.observation_config.include_feasible_mask:
             features.extend(mask.tolist())

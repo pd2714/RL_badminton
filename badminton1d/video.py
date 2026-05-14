@@ -7,8 +7,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import imageio.v2 as imageio
-import matplotlib
 import numpy as np
+
+from badminton1d.mpl_config import ensure_writable_matplotlib_config
+
+ensure_writable_matplotlib_config()
+
+import matplotlib
 
 matplotlib.use("Agg")
 
@@ -37,6 +42,7 @@ from badminton1d.render import (
     setup_court_axes,
     stage_colors,
 )
+from badminton1d.shot_generators import name_velocity_shot
 from badminton1d.trajectory import position_at_time
 from badminton1d.utils import ensure_directory
 
@@ -99,10 +105,33 @@ def _trajectory_segment(stage: StageTrace, config: SimulationConfig) -> tuple[np
     return np.asarray(xs, dtype=float), np.asarray(ys, dtype=float), np.asarray(zs, dtype=float)
 
 
-def _overlay_text(snapshot: FrameSnapshot) -> str:
+def _shot_type_text(stage: StageTrace, config: SimulationConfig) -> str:
+    vx, vy, vz = stage.shuttle_velocity
+    horizontal_speed = float(np.hypot(vx, vy))
+    theta_degrees = float(np.degrees(np.arctan2(vz, horizontal_speed)))
+    shot_name = name_velocity_shot(
+        hitter=stage.hitter_side,
+        contact_x=stage.shuttle_start[0],
+        contact_y=stage.shuttle_start[1],
+        landing_x=stage.shuttle_landing[0],
+        landing_y=stage.shuttle_landing[1],
+        theta_degrees=theta_degrees,
+        config=config,
+    )
+    return f"shot {shot_name}"
+
+
+def _shot_speed_text(stage: StageTrace) -> str:
+    speed = float(np.linalg.norm(stage.shuttle_velocity))
+    return f"speed {speed:.1f} m/s"
+
+
+def _overlay_text(stage: StageTrace, snapshot: FrameSnapshot, config: SimulationConfig) -> str:
     lines = [
         f"stage {snapshot.stage_index}",
         f"hitter {snapshot.hitter_side}",
+        _shot_type_text(stage, config),
+        _shot_speed_text(stage),
         f"flight {snapshot.local_time:.2f}/{snapshot.playback_duration:.2f}s",
         f"z={snapshot.shuttle_position[2]:.2f}m",
     ]
@@ -118,8 +147,13 @@ def _overlay_text(snapshot: FrameSnapshot) -> str:
     return "\n".join(lines)
 
 
-def _progress_overlay_text(sample: TrainingProgressSample, snapshot: FrameSnapshot) -> str:
-    lines = [f"train step {sample.step}", _overlay_text(snapshot)]
+def _progress_overlay_text(
+    sample: TrainingProgressSample,
+    stage: StageTrace,
+    snapshot: FrameSnapshot,
+    config: SimulationConfig,
+) -> str:
+    lines = [f"train step {sample.step}", _overlay_text(stage, snapshot, config)]
     if sample.opponent_label:
         lines.append(f"opponent {sample.opponent_label}")
     if sample.rally_won is not None:
@@ -167,6 +201,25 @@ def _draw_service_markers_side_view(
                 linewidth=1.4,
                 zorder=1,
             )
+
+
+def _draw_backline_markers_side_view(
+    ax: plt.Axes,
+    config: SimulationConfig,
+    colors: dict[str, str],
+) -> None:
+    if config.court.lateral_motion_enabled:
+        return
+
+    marker_height = min(max(config.court.net_height * 0.18, 0.18), 0.28)
+    for backline_y in (-config.court.half_length, config.court.half_length):
+        ax.plot(
+            [backline_y, backline_y],
+            [0.0, marker_height],
+            color=colors["court_line"],
+            linewidth=1.6,
+            zorder=1,
+        )
 
 
 def _draw_1d_side_players(
@@ -242,11 +295,18 @@ def _render_frame(
     resolved_view = _resolve_view(config, view)
     colors = stage_colors(monochrome)
     intended_point = stage.intended_intercept_point or stage.intercept_point
-    fig, ax = plt.subplots(figsize=figure_size or config.render.figure_size, dpi=dpi)
+    resolved_figure_size = figure_size or ((4.9, 5.3) if resolved_view == "3d" else config.render.figure_size)
+    fig, ax = plt.subplots(figsize=resolved_figure_size, dpi=dpi)
     if resolved_view == "top":
         setup_court_axes(ax, config, colors, show_axes=False)
         left_contact = stage.shuttle_start[:2] if stage.hitter_side == "left" else None
         right_contact = stage.shuttle_start[:2] if stage.hitter_side == "right" else None
+        if intended_point is not None:
+            receiver_contact = (float(intended_point[0]), float(intended_point[1]))
+            if stage.receiver_side == "left":
+                left_contact = receiver_contact
+            else:
+                right_contact = receiver_contact
         draw_players(
             ax,
             config,
@@ -281,12 +341,22 @@ def _render_frame(
         )
     elif resolved_view == "3d":
         plt.close(fig)
-        fig = plt.figure(figsize=figure_size or config.render.figure_size, dpi=dpi)
+        fig = plt.figure(figsize=resolved_figure_size, dpi=dpi)
         ax = fig.add_subplot(111, projection="3d")
         setup_3d_court_axes(ax, config, colors, show_axes=False)
 
         left_contact = stage.shuttle_start if stage.hitter_side == "left" else None
         right_contact = stage.shuttle_start if stage.hitter_side == "right" else None
+        if intended_point is not None:
+            receiver_contact = (
+                float(intended_point[0]),
+                float(intended_point[1]),
+                float(intended_point[2]),
+            )
+            if stage.receiver_side == "left":
+                left_contact = receiver_contact
+            else:
+                right_contact = receiver_contact
         draw_players_3d(
             ax,
             config,
@@ -327,9 +397,10 @@ def _render_frame(
         ax.set_xlim(y_min, y_max)
         ax.set_ylim(-0.15, config.render.z_max + 0.3)
         ax.set_facecolor(colors["court_fill"])
-        ax.axhline(0.0, color=colors["court_line"], linewidth=2.0, zorder=1)
+        ax.axhline(0.0, color=colors["court_line"], linewidth=2.6, zorder=1)
         ax.axvline(config.court.net_y, ymin=0.0, ymax=config.court.net_height / max(config.render.z_max + 0.3, 1e-6), color=colors["net"], linewidth=2.4, zorder=2)
         _draw_service_markers_side_view(ax, config, colors)
+        _draw_backline_markers_side_view(ax, config, colors)
         ax.set_axis_off()
 
         traj_xs, traj_ys, traj_zs = _trajectory_segment(stage, config)
@@ -376,15 +447,15 @@ def _render_frame(
     elif overlay_text is not None:
         text_fn = ax.text2D if hasattr(ax, "text2D") else ax.text
         text_fn(
-            0.015,
-            0.98,
+            0.14,
+            0.91,
             overlay_text,
             transform=ax.transAxes,
             ha="left",
             va="top",
-            fontsize=10,
+            fontsize=9,
             color=colors["notes"],
-            bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 4.0},
+            bbox={"facecolor": "white", "alpha": 0.75, "edgecolor": "none", "pad": 1.8},
         )
 
     fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
@@ -411,7 +482,7 @@ def render_video_frame(
         figure_size=figure_size,
         dpi=dpi,
         monochrome=monochrome,
-        overlay_text=_overlay_text(snapshot),
+        overlay_text=_overlay_text(stage, snapshot, config),
         view=view,
     )
 
@@ -444,7 +515,8 @@ def render_match_frame(
         rally_number=rally_trace.rally_number,
         stage_number=stage.stage_index + 1,
         hitter_side=snapshot.hitter_side,
-        flight_time_text=f"flight {snapshot.local_time:.2f}/{stage.end_time:.2f}s",
+        shot_text=_shot_type_text(stage, config),
+        flight_time_text=f"{_shot_speed_text(stage)} | flight {snapshot.local_time:.2f}/{stage.end_time:.2f}s",
         intercept_text=_match_intercept_text(stage),
         point_winner=rally_trace.winner if stage.terminal else None,
         match_winner=rally_trace.match_winner if stage.terminal else None,
@@ -555,10 +627,12 @@ def export_rally_video(
     frame_index = 0
     pause_frames = int(round(stage_pause * fps))
 
-    for stage in trace.stages:
+    for stage_index, stage in enumerate(trace.stages):
         stage_times = _stage_sample_times(stage.playback_duration, fps)
+        if stage_index > 0:
+            stage_times = stage_times[1:]
         for local_time in stage_times:
-            snapshot = interpolate_stage(stage, local_time)
+            snapshot = interpolate_stage(stage, local_time, config=config)
             frame = render_video_frame(
                 stage,
                 snapshot,
@@ -614,10 +688,12 @@ def export_match_video(
     frame_index = 0
 
     for rally_trace in trace.rallies:
-        for stage in rally_trace.stages:
+        for stage_index, stage in enumerate(rally_trace.stages):
             stage_times = _stage_sample_times(stage.playback_duration, fps)
+            if stage_index > 0:
+                stage_times = stage_times[1:]
             for local_time in stage_times:
-                snapshot = interpolate_stage(stage, local_time)
+                snapshot = interpolate_stage(stage, local_time, config=config)
                 frame = render_match_frame(
                     rally_trace,
                     stage,
@@ -685,10 +761,12 @@ def export_training_progress_video(
     rally_pause_frames = int(round(rally_pause * fps))
 
     for sample in samples:
-        for stage in sample.trace.stages:
+        for stage_index, stage in enumerate(sample.trace.stages):
             stage_times = _stage_sample_times(stage.playback_duration, fps)
+            if stage_index > 0:
+                stage_times = stage_times[1:]
             for local_time in stage_times:
-                snapshot = interpolate_stage(stage, local_time)
+                snapshot = interpolate_stage(stage, local_time, config=config)
                 frame = _render_frame(
                     stage,
                     snapshot,
@@ -696,7 +774,7 @@ def export_training_progress_video(
                     figure_size=figure_size,
                     dpi=dpi,
                     monochrome=monochrome,
-                    overlay_text=_progress_overlay_text(sample, snapshot),
+                    overlay_text=_progress_overlay_text(sample, stage, snapshot, config),
                     view=view,
                 )
                 if write_frames:
@@ -793,7 +871,7 @@ def export_training_progress_preview_video(
             stage = sample.trace.stages[stage_index]
             local_times = np.linspace(0.0, stage.playback_duration, num=frames_per_stage).tolist()
             for local_time in local_times:
-                snapshot = interpolate_stage(stage, float(local_time))
+                snapshot = interpolate_stage(stage, float(local_time), config=config)
                 frame = _render_frame(
                     stage,
                     snapshot,
@@ -801,7 +879,7 @@ def export_training_progress_preview_video(
                     figure_size=figure_size,
                     dpi=dpi,
                     monochrome=monochrome,
-                    overlay_text=_progress_overlay_text(sample, snapshot),
+                    overlay_text=_progress_overlay_text(sample, stage, snapshot, config),
                     view=view,
                 )
                 frames.append(frame)

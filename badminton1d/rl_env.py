@@ -11,17 +11,29 @@ from badminton1d.action_space import DiscreteActionConfig, DiscreteActionMapper
 from badminton1d.config import SimulationConfig
 from badminton1d.dynamics import feasible_intercept_indices, validate_and_clip_shot_action
 from badminton1d.env import Badminton1DEnv
-from badminton1d.match import MatchConfig, MatchScore, reset_for_serve
+from badminton1d.match import MatchConfig, MatchScore, reset_for_serve, with_service_court_x_side
 from badminton1d.obs import ObservationConfig, ObservationEncoder
 from badminton1d.opponents import DecisionContext, OpponentPolicy, make_opponent
 from badminton1d.reset_sampling import ResetSampler, ResetSamplingConfig
 from badminton1d.reward_shaping import (
     ActionStreakTracker,
+    AttackRewardConfig,
+    DefensiveLiftRewardConfig,
     LoopPenaltyConfig,
+    NetProximityRewardConfig,
+    OpponentTravelRewardConfig,
     PressureRewardConfig,
+    ReturnDepthRewardConfig,
+    attack_reward_from_record,
+    defensive_lift_reward_from_record,
+    intercept_flight_ratio_reward_from_record,
     loop_penalty_for_streak,
+    net_proximity_reward_from_record,
+    opponent_travel_reward_from_record,
     pressure_reward_from_record,
+    return_depth_reward_from_record,
 )
+from badminton1d.shot_generators import TacticRuntimeConfig
 from badminton1d.state import ShotAction, Side, StageRecord, ValidatedShotAction
 from badminton1d.utils import opponent_side, player_position
 
@@ -32,6 +44,16 @@ def _terminal_rewards(winner: Side | None) -> tuple[float, float]:
     if winner == "right":
         return -1.0, 1.0
     return 0.0, 0.0
+
+
+def _sparse_histogram_payload(prefix: str, hist: np.ndarray) -> dict[str, Any]:
+    indices = np.flatnonzero(hist)
+    counts = hist[indices]
+    return {
+        f"{prefix}_size": int(hist.size),
+        f"{prefix}_indices": indices.astype(int).tolist(),
+        f"{prefix}_counts": counts.astype(int).tolist(),
+    }
 
 
 @dataclass(frozen=True)
@@ -48,6 +70,14 @@ class RewardConfig:
     stall_penalty_start: int = 0
     loop_penalty: LoopPenaltyConfig = field(default_factory=LoopPenaltyConfig)
     pressure_reward: PressureRewardConfig = field(default_factory=PressureRewardConfig)
+    opponent_travel_reward: OpponentTravelRewardConfig = field(default_factory=OpponentTravelRewardConfig)
+    return_depth_reward: ReturnDepthRewardConfig = field(default_factory=ReturnDepthRewardConfig)
+    net_proximity_reward: NetProximityRewardConfig = field(default_factory=NetProximityRewardConfig)
+    attack_reward: AttackRewardConfig = field(default_factory=AttackRewardConfig)
+    defensive_lift_reward: DefensiveLiftRewardConfig = field(default_factory=DefensiveLiftRewardConfig)
+    feasible_pressure_reward_weight: float = 0.0
+    no_feasible_intercept_bonus: float = 0.0
+    opponent_intercept_continue_penalty: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -57,12 +87,15 @@ class RLEnvConfig:
     initial_server: str = "left"
     mirror_train_side: bool = False
     mirror_match_fraction: float = 0.0
+    random_service_x: bool = False
     train_reaction_time: float = 0.0
     opponent_reaction_time: float = 0.0
     max_stages_per_rally: int = 30
     serve_z0: float = 1.15
     include_feasible_mask: bool = True
     include_records_in_info: bool = False
+    policy_type: str = "velocity_oriented"
+    tactic_runtime: TacticRuntimeConfig = field(default_factory=TacticRuntimeConfig)
     reset_sampling: ResetSamplingConfig = field(default_factory=ResetSamplingConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
 
@@ -89,7 +122,12 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         self.base_env = Badminton1DEnv(config=self.config)
         self.train_side = self.rl_config.train_side
         self.opponent_side = opponent_side(self.train_side)
-        self.action_mapper = DiscreteActionMapper(self.config, discrete_action_config)
+        self.action_mapper = DiscreteActionMapper(
+            self.config,
+            discrete_action_config,
+            policy_type=self.rl_config.policy_type,
+            tactic_runtime_config=self.rl_config.tactic_runtime,
+        )
         self.observation_encoder = ObservationEncoder(
             self.config,
             ObservationConfig(
@@ -126,15 +164,31 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         self.last_episode_info: dict[str, Any] | None = None
         self._episode_hitter_hist = np.zeros(self.action_mapper.hitter_action_count, dtype=np.int64)
         self._episode_intercept_hist = np.zeros(self.config.action.intercept_count, dtype=np.int64)
+        self._episode_tactic_zone_hist = np.zeros(len(self.action_mapper.tactic_zone_names), dtype=np.int64)
+        self._episode_tactic_angle_hist = np.zeros(len(self.action_mapper.tactic_angle_names), dtype=np.int64)
+        self._episode_tactic_power_hist = np.zeros(len(self.action_mapper.tactic_power_names), dtype=np.int64)
+        self._episode_tactic_shot_hist = np.zeros(len(self.action_mapper.tactic_shot_names), dtype=np.int64)
+        self._episode_tactic_lookup_valid_count = 0
+        self._episode_tactic_lookup_fallback_count = 0
         self._episode_invalid_action_count = 0
         self._action_streak_tracker = ActionStreakTracker()
         self._episode_loop_penalty_total = 0.0
         self._episode_pressure_reward_total = 0.0
+        self._episode_opponent_travel_reward_total = 0.0
+        self._episode_return_depth_reward_total = 0.0
+        self._episode_net_proximity_reward_total = 0.0
+        self._episode_attack_reward_total = 0.0
+        self._episode_defensive_lift_reward_total = 0.0
+        self._episode_intercept_flight_ratio_reward_total = 0.0
+        self._episode_feasible_pressure_reward_total = 0.0
+        self._episode_no_feasible_intercept_bonus_total = 0.0
+        self._episode_opponent_intercept_penalty_total = 0.0
         self._episode_defensive_return_reward_total = 0.0
         self._episode_serve_return_reward_total = 0.0
         self._episode_stage_penalty_total = 0.0
         self._episode_stall_penalty_total = 0.0
         self._episode_random_start = False
+        self._episode_service_x_side: Side | None = None
 
     def reset(
         self,
@@ -154,14 +208,30 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         self.last_episode_info = None
         self._episode_hitter_hist.fill(0)
         self._episode_intercept_hist.fill(0)
+        self._episode_tactic_zone_hist.fill(0)
+        self._episode_tactic_angle_hist.fill(0)
+        self._episode_tactic_power_hist.fill(0)
+        self._episode_tactic_shot_hist.fill(0)
+        self._episode_tactic_lookup_valid_count = 0
+        self._episode_tactic_lookup_fallback_count = 0
         self._episode_invalid_action_count = 0
         self._action_streak_tracker.reset()
         self._episode_loop_penalty_total = 0.0
         self._episode_pressure_reward_total = 0.0
+        self._episode_opponent_travel_reward_total = 0.0
+        self._episode_return_depth_reward_total = 0.0
+        self._episode_net_proximity_reward_total = 0.0
+        self._episode_attack_reward_total = 0.0
+        self._episode_defensive_lift_reward_total = 0.0
+        self._episode_intercept_flight_ratio_reward_total = 0.0
+        self._episode_feasible_pressure_reward_total = 0.0
+        self._episode_no_feasible_intercept_bonus_total = 0.0
+        self._episode_opponent_intercept_penalty_total = 0.0
         self._episode_defensive_return_reward_total = 0.0
         self._episode_serve_return_reward_total = 0.0
         self._episode_stage_penalty_total = 0.0
         self._episode_stall_penalty_total = 0.0
+        self._episode_service_x_side = None
         self.pending_requested_action = None
         self.pending_applied_action = None
         self.pending_feasible_indices = []
@@ -178,6 +248,7 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
             )
             self.current_server = sampled_server
             self._episode_random_start = was_randomized
+            initial_state = self._maybe_randomize_service_x(initial_state)
             initial_state = self._apply_reaction_times(initial_state)
             self.base_env.reset(initial_state)
             if hasattr(self.opponent, "on_episode_start"):
@@ -258,6 +329,9 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
                 "action_role": self.role if not terminated and not truncated else None,
             }
         )
+        recovery_after_observation = self._recovery_factorized_after_observation(record)
+        if recovery_after_observation is not None:
+            info["recovery_factorized_after_observation"] = recovery_after_observation
 
         if terminated or truncated:
             metrics = self._episode_metrics(record, truncated=truncated)
@@ -278,8 +352,9 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         )
 
     def _step_hitter(self, action: int) -> tuple[StageRecord, float]:
-        decode = self.action_mapper.decode_hitter(action, self.base_env.state)
+        decode = self.action_mapper.decode_hitter_for_agent(action, self.base_env.state, self.train_side)
         self._episode_hitter_hist[decode.flat_index] += 1
+        self._record_tactic_decode(decode)
         streak = self._action_streak_tracker.observe(decode.flat_index)
 
         try:
@@ -319,11 +394,70 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
             pressure_reward = pressure_reward_from_record(
                 record,
                 weight=self.rl_config.reward.pressure_reward.weight,
-                z_min=self.config.player.z_min,
-                z_max=self.config.player.z_max,
+                config=self.config,
             )
             reward += pressure_reward
             self._episode_pressure_reward_total += pressure_reward
+            opponent_travel_reward = opponent_travel_reward_from_record(
+                record,
+                weight=self.rl_config.reward.opponent_travel_reward.weight,
+                config=self.config,
+            )
+            reward += opponent_travel_reward
+            self._episode_opponent_travel_reward_total += opponent_travel_reward
+            return_depth_reward = return_depth_reward_from_record(
+                record,
+                weight=self.rl_config.reward.return_depth_reward.weight,
+                config=self.config,
+            )
+            reward += return_depth_reward
+            self._episode_return_depth_reward_total += return_depth_reward
+            net_proximity_reward = net_proximity_reward_from_record(
+                record,
+                weight=self.rl_config.reward.net_proximity_reward.weight,
+                net_y=self.config.court.net_y,
+                distance_threshold=self.rl_config.reward.net_proximity_reward.distance_threshold,
+            )
+            reward += net_proximity_reward
+            self._episode_net_proximity_reward_total += net_proximity_reward
+            attack_reward = attack_reward_from_record(
+                record,
+                config=self.config,
+                reward_config=self.rl_config.reward.attack_reward,
+            )
+            reward += attack_reward
+            self._episode_attack_reward_total += attack_reward
+            defensive_lift_reward = defensive_lift_reward_from_record(
+                record,
+                config=self.config,
+                reward_config=self.rl_config.reward.defensive_lift_reward,
+            )
+            reward += defensive_lift_reward
+            self._episode_defensive_lift_reward_total += defensive_lift_reward
+            intercept_flight_ratio_reward = intercept_flight_ratio_reward_from_record(
+                record,
+                config=self.config,
+                reward_config=self.rl_config.reward.defensive_lift_reward,
+            )
+            reward += intercept_flight_ratio_reward
+            self._episode_intercept_flight_ratio_reward_total += intercept_flight_ratio_reward
+            if record.terminal_reason != "invalid_serve_target":
+                intercept_count = max(int(self.config.action.intercept_count), 1)
+                feasible_fraction = len(record.feasible_indices) / float(intercept_count)
+                feasible_pressure_reward = (
+                    float(self.rl_config.reward.feasible_pressure_reward_weight)
+                    * max(0.0, min(1.0, 1.0 - feasible_fraction))
+                )
+                reward += feasible_pressure_reward
+                self._episode_feasible_pressure_reward_total += feasible_pressure_reward
+            if record.terminal_reason == "no_feasible_intercept":
+                no_feasible_bonus = max(float(self.rl_config.reward.no_feasible_intercept_bonus), 0.0)
+                reward += no_feasible_bonus
+                self._episode_no_feasible_intercept_bonus_total += no_feasible_bonus
+            elif not record.next_state.rally_done:
+                intercept_penalty = max(float(self.rl_config.reward.opponent_intercept_continue_penalty), 0.0)
+                reward -= intercept_penalty
+                self._episode_opponent_intercept_penalty_total += intercept_penalty
         return record, reward
 
     def _step_receiver(self, action: int) -> tuple[StageRecord, float]:
@@ -402,7 +536,7 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         next_state = replace(
             state,
             rally_done=True,
-            winner=self.train_side,
+            winner=winner,
             stage_index=state.stage_index + 1,
         )
         self.base_env.state = next_state
@@ -445,6 +579,8 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
             "opponent_label": self.opponent.label() if hasattr(self.opponent, "label") else self.rl_config.opponent_type,
             "feasible_indices": list(self.pending_feasible_indices),
             "randomized_start": self._episode_random_start,
+            "service_x_side": self._episode_service_x_side,
+            "policy_type": self.action_mapper.policy_type,
         }
 
     def _get_obs(self) -> np.ndarray:
@@ -457,6 +593,28 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
             score_right=self.score.right,
             pending_action=self.pending_applied_action,
             feasible_indices=self.pending_feasible_indices,
+        )
+
+    def _recovery_factorized_after_observation(self, record: StageRecord) -> np.ndarray | None:
+        """Observation for V(s_after_recovery) in recovery-factorized PPO.
+
+        The public next observation may already include a newly sampled opponent
+        pending shot. For the recovery-only advantage, use the clean post-shot
+        state produced by the stage transition, before any next decision context
+        is attached.
+        """
+        if record.state_before.current_hitter != self.train_side or record.next_state.rally_done:
+            return None
+        next_role = "hitter" if record.next_state.current_hitter == self.train_side else "receiver"
+        return self.observation_encoder.encode(
+            state=record.next_state,
+            agent_side=self.train_side,
+            role=next_role,
+            server_side=self.current_server,
+            score_left=self.score.left,
+            score_right=self.score.right,
+            pending_action=None,
+            feasible_indices=[],
         )
 
     def _resolve_server(self, server_value: str | None) -> Side:
@@ -490,6 +648,13 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         self.train_side = side
         self.opponent_side = opponent_side(self.train_side)
 
+    def _maybe_randomize_service_x(self, state: StageState) -> StageState:
+        if not self.rl_config.random_service_x or state.stage_index != 0 or state.rally_done:
+            return state
+        server_x_side: Side = "left" if bool(self.rng.integers(0, 2)) else "right"
+        self._episode_service_x_side = server_x_side
+        return with_service_court_x_side(state, self.config, server_x_side=server_x_side)
+
     def refresh_opponent_pool(self) -> None:
         if hasattr(self.opponent, "refresh"):
             self.opponent.refresh()
@@ -515,16 +680,55 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
             "terminal_reason": "max_stages_exceeded" if truncated else record.terminal_reason,
             "invalid_action_count": int(self._episode_invalid_action_count),
             "invalid_action_rate": float(invalid_rate),
-            "hitter_action_hist": self._episode_hitter_hist.astype(int).tolist(),
-            "intercept_hist": self._episode_intercept_hist.astype(int).tolist(),
+            "policy_type": self.action_mapper.policy_type,
+            "tactic_zone_names": list(self.action_mapper.tactic_zone_names),
+            "tactic_angle_names": list(self.action_mapper.tactic_angle_names),
+            "tactic_power_names": list(self.action_mapper.tactic_power_names),
+            "tactic_shot_names": list(self.action_mapper.tactic_shot_names),
+            "tactic_zone_hist": self._episode_tactic_zone_hist.astype(int).tolist(),
+            "tactic_angle_hist": self._episode_tactic_angle_hist.astype(int).tolist(),
+            "tactic_power_hist": self._episode_tactic_power_hist.astype(int).tolist(),
+            "tactic_shot_hist": self._episode_tactic_shot_hist.astype(int).tolist(),
+            "tactic_lookup_valid_count": int(self._episode_tactic_lookup_valid_count),
+            "tactic_lookup_fallback_count": int(self._episode_tactic_lookup_fallback_count),
             "server": self.current_server,
             "loop_penalty_total": float(self._episode_loop_penalty_total),
             "pressure_reward_total": float(self._episode_pressure_reward_total),
+            "opponent_travel_reward_total": float(self._episode_opponent_travel_reward_total),
+            "return_depth_reward_total": float(self._episode_return_depth_reward_total),
+            "net_proximity_reward_total": float(self._episode_net_proximity_reward_total),
+            "attack_reward_total": float(self._episode_attack_reward_total),
+            "defensive_lift_reward_total": float(self._episode_defensive_lift_reward_total),
+            "intercept_flight_ratio_reward_total": float(self._episode_intercept_flight_ratio_reward_total),
+            "feasible_pressure_reward_total": float(self._episode_feasible_pressure_reward_total),
+            "no_feasible_intercept_bonus_total": float(self._episode_no_feasible_intercept_bonus_total),
+            "opponent_intercept_penalty_total": float(self._episode_opponent_intercept_penalty_total),
             "defensive_return_reward_total": float(self._episode_defensive_return_reward_total),
             "serve_return_reward_total": float(self._episode_serve_return_reward_total),
             "stage_penalty_total": float(self._episode_stage_penalty_total),
             "stall_penalty_total": float(self._episode_stall_penalty_total),
             "randomized_start": bool(self._episode_random_start),
         }
+        metrics.update(_sparse_histogram_payload("hitter_action_hist", self._episode_hitter_hist))
+        metrics.update(_sparse_histogram_payload("intercept_hist", self._episode_intercept_hist))
         metrics.update(self._action_streak_tracker.summary())
         return metrics
+
+    def _record_tactic_decode(self, decode) -> None:
+        if decode.landing_zone_index is not None and 0 <= decode.landing_zone_index < self._episode_tactic_zone_hist.size:
+            self._episode_tactic_zone_hist[decode.landing_zone_index] += 1
+        if decode.angle_bin_index is not None and 0 <= decode.angle_bin_index < self._episode_tactic_angle_hist.size:
+            self._episode_tactic_angle_hist[decode.angle_bin_index] += 1
+        if decode.power_bin_index is not None and 0 <= decode.power_bin_index < self._episode_tactic_power_hist.size:
+            self._episode_tactic_power_hist[decode.power_bin_index] += 1
+        if decode.tactic_shot_name is not None and self._episode_tactic_shot_hist.size:
+            try:
+                shot_index = self.action_mapper.tactic_shot_names.index(decode.tactic_shot_name)
+            except ValueError:
+                shot_index = -1
+            if shot_index >= 0:
+                self._episode_tactic_shot_hist[shot_index] += 1
+        if decode.lookup_valid:
+            self._episode_tactic_lookup_valid_count += 1
+        if decode.lookup_fallback_used:
+            self._episode_tactic_lookup_fallback_count += 1

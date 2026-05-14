@@ -34,6 +34,10 @@ class StageState:
     x0: float
     y0: float
     z0: float
+    v_x_left: float = 0.0
+    v_y_left: float = 0.0
+    v_x_right: float = 0.0
+    v_y_right: float = 0.0
     reaction_time_left: float = 0.0
     reaction_time_right: float = 0.0
     rally_done: bool = False

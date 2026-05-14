@@ -5,7 +5,8 @@ from dataclasses import replace
 import numpy as np
 
 from badminton1d.config import SimulationConfig
-from badminton1d.state import ShotAction, StageRecord, StageState, ValidatedShotAction
+from badminton1d.movement import advance_player_toward, can_arrive_by_time, intercept_body_target_after_reaction
+from badminton1d.state import ShotAction, Side, StageRecord, StageState, ValidatedShotAction
 from badminton1d.trajectory import (
     TrajectoryResult,
     ballistic_landing_point,
@@ -15,23 +16,49 @@ from badminton1d.trajectory import (
     simulate_trajectory,
 )
 from badminton1d.utils import (
-    move_toward,
     opponent_side,
     player_position,
+    player_velocity,
     recovery_bounds,
-    service_target_bounds_for_receiver,
+    service_target_bounds_for_receiver_state,
     target_bounds_for_receiver,
 )
 
 
-REACTION_MISS_FLIGHT_TIME_THRESHOLD = 0.3
-REACTION_MISS_PROBABILITY = 0.7
+REACTION_MISS_FLIGHT_TIME_THRESHOLD = 0.1
+REACTION_MISS_PROBABILITY = 0.9
+REACTION_MISS_SECONDARY_FLIGHT_TIME_THRESHOLD = 0.5
+REACTION_MISS_SECONDARY_PROBABILITY = 0.3
+REACTION_MISS_ZERO_FLIGHT_TIME_THRESHOLD = 0.7
 
 
 def reaction_time_for_side(state: StageState, side: str) -> float:
     if side == "left":
         return float(state.reaction_time_left)
     return float(state.reaction_time_right)
+
+
+def reaction_miss_probability(flight_time: float, config: SimulationConfig | None = None) -> float:
+    action_config = SimulationConfig().action if config is None else config.action
+    t = float(flight_time)
+    fast_t = action_config.reaction_miss_fast_threshold
+    secondary_t = action_config.reaction_miss_secondary_threshold
+    zero_t = action_config.reaction_miss_zero_threshold
+    fast_p = action_config.reaction_miss_fast_probability
+    secondary_p = action_config.reaction_miss_secondary_probability
+    if t < fast_t:
+        return fast_p
+    if t <= secondary_t:
+        if secondary_t <= fast_t:
+            return secondary_p
+        ratio = (t - fast_t) / (secondary_t - fast_t)
+        return float(fast_p + ratio * (secondary_p - fast_p))
+    if t < zero_t:
+        if zero_t <= secondary_t:
+            return 0.0
+        ratio = (t - secondary_t) / (zero_t - secondary_t)
+        return float(secondary_p * (1.0 - ratio))
+    return 0.0
 
 
 def vy_bounds_for_hitter(side: str, config: SimulationConfig) -> tuple[float, float]:
@@ -42,6 +69,7 @@ def vy_bounds_for_hitter(side: str, config: SimulationConfig) -> tuple[float, fl
 
 def _candidate_is_feasible(
     receiver_start: tuple[float, float],
+    receiver_velocity: tuple[float, float],
     receiver: str,
     t: float,
     x_pos: float,
@@ -51,9 +79,16 @@ def _candidate_is_feasible(
     *,
     reaction_time: float = 0.0,
 ) -> bool:
-    available_time = max(float(t) - float(reaction_time), 0.0)
-    distance = float(np.hypot(receiver_start[0] - x_pos, receiver_start[1] - y_pos))
-    ground_reach = distance <= (config.player.v_max * available_time + config.player.r_reach)
+    ground_reach = can_arrive_by_time(
+        receiver_start,
+        receiver_velocity,
+        (float(x_pos), float(y_pos)),
+        float(t),
+        config,
+        reach_side=receiver,
+        target_z=float(z_pos),
+        reaction_time=reaction_time,
+    )
     height_reach = config.player.z_min <= float(z_pos) <= config.player.z_max
     on_receiver_side = y_pos < config.court.net_y if receiver == "left" else y_pos > config.court.net_y
     return ground_reach and height_reach and on_receiver_side
@@ -83,11 +118,13 @@ def _feasible_time_representatives(
 
     receiver = opponent_side(state.current_hitter)
     receiver_start = player_position(state, receiver)
+    receiver_speed = player_velocity(state, receiver)
     receiver_reaction_time = reaction_time_for_side(state, receiver)
     feasible_mask = np.asarray(
         [
             _candidate_is_feasible(
                 receiver_start,
+                receiver_speed,
                 receiver,
                 t,
                 x_pos,
@@ -285,6 +322,15 @@ def validate_and_clip_shot_action(
     action: ShotAction,
     config: SimulationConfig,
 ) -> ValidatedShotAction:
+    validated, _ = validate_and_clip_shot_action_with_result(state, action, config)
+    return validated
+
+
+def validate_and_clip_shot_action_with_result(
+    state: StageState,
+    action: ShotAction,
+    config: SimulationConfig,
+) -> tuple[ValidatedShotAction, TrajectoryResult]:
     (rec_x_low, rec_x_high), (rec_y_low, rec_y_high) = recovery_bounds(state.current_hitter, config)
     vy_low, vy_high = vy_bounds_for_hitter(state.current_hitter, config)
     vx_low = config.action.vx_min if config.court.lateral_motion_enabled else 0.0
@@ -309,7 +355,7 @@ def validate_and_clip_shot_action(
     if not valid_hitter_action(state, applied, config, result=active):
         raise ValueError("Shot action is not physically valid for the current stage.")
 
-    return ValidatedShotAction(requested=action, applied=applied, projected=projected)
+    return ValidatedShotAction(requested=action, applied=applied, projected=projected), active
 
 
 def _ballistic_candidate_points(
@@ -318,11 +364,26 @@ def _ballistic_candidate_points(
     config: SimulationConfig,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     total_time = ballistic_landing_time(state.z0, action.v_z, config.action.gravity)
-    base_times = config.candidate_times(total_time)
+    net_crossing = ballistic_net_crossing(
+        state.x0,
+        state.y0,
+        state.z0,
+        action.v_x,
+        action.v_y,
+        action.v_z,
+        config.court.net_y,
+        g=config.action.gravity,
+    )
+    lower_bound = None if net_crossing is None else float(net_crossing.t + 1e-6)
+    base_times = config.candidate_times(total_time, lower_bound=lower_bound)
     dense_count = max(config.action.intercept_count * 20, 200)
+    dense_lower = config.action.intercept_time_min if lower_bound is None else lower_bound
+    dense_upper = total_time - config.action.intercept_margin_before_landing
+    if dense_upper <= dense_lower:
+        return np.asarray([], dtype=float), np.asarray([], dtype=float), np.asarray([], dtype=float), np.asarray([], dtype=float)
     dense_times = np.linspace(
-        config.action.intercept_time_min,
-        total_time - config.action.intercept_margin_before_landing,
+        dense_lower,
+        dense_upper,
         dense_count,
     )
     dense_xs: list[float] = []
@@ -374,10 +435,16 @@ def _sample_drag_candidates(
     if len(result.samples) <= 2:
         return np.asarray([], dtype=float), np.asarray([], dtype=float), np.asarray([], dtype=float), np.asarray([], dtype=float)
 
+    lower_bound = (
+        config.action.intercept_time_min
+        if result.net_crossing is None
+        else float(result.net_crossing.t + 1e-6)
+    )
+    upper_bound = result.landing_time - config.action.intercept_margin_before_landing
     points = [
         point
         for point in result.samples[1:-1]
-        if config.action.intercept_time_min <= point.t <= result.landing_time - config.action.intercept_margin_before_landing
+        if lower_bound <= point.t <= upper_bound
     ]
     if not points:
         return np.asarray([], dtype=float), np.asarray([], dtype=float), np.asarray([], dtype=float), np.asarray([], dtype=float)
@@ -429,6 +496,7 @@ def feasible_intercept_indices(
 ) -> list[int]:
     receiver = opponent_side(state.current_hitter)
     receiver_start = player_position(state, receiver)
+    receiver_speed = player_velocity(state, receiver)
     receiver_reaction_time = reaction_time_for_side(state, receiver)
     times, xs, ys, zs = candidate_intercept_points(state, action, config)
 
@@ -436,6 +504,7 @@ def feasible_intercept_indices(
     for index, (t, x_pos, y_pos, z_pos) in enumerate(zip(times, xs, ys, zs)):
         if _candidate_is_feasible(
             receiver_start,
+            receiver_speed,
             receiver,
             t,
             x_pos,
@@ -464,8 +533,14 @@ def _terminal_rewards(winner: str | None) -> tuple[float, float]:
     return 0.0, 0.0
 
 
-def _is_legal_service_landing(landing_x: float, landing_y: float, receiver: str, config: SimulationConfig) -> bool:
-    x_bounds, y_bounds = service_target_bounds_for_receiver(receiver, config)
+def _is_legal_service_landing(
+    state: StageState,
+    landing_x: float,
+    landing_y: float,
+    receiver: Side,
+    config: SimulationConfig,
+) -> bool:
+    x_bounds, y_bounds = service_target_bounds_for_receiver_state(state, receiver, config)
     return x_bounds[0] <= landing_x <= x_bounds[1] and y_bounds[0] <= landing_y <= y_bounds[1]
 
 
@@ -494,7 +569,7 @@ def step_stage(
             f"vz={validated.applied.v_z:.2f}, x_rec={validated.applied.x_rec:.2f}, y_rec={validated.applied.y_rec:.2f})"
         )
 
-    if state.stage_index == 0 and not _is_legal_service_landing(active.landing_x, active.landing_y, receiver_side, config):
+    if state.stage_index == 0 and not _is_legal_service_landing(state, active.landing_x, active.landing_y, receiver_side, config):
         notes.append("Serve landed outside the legal cross-court service box.")
         next_state = replace(
             state,
@@ -589,10 +664,11 @@ def step_stage(
     x_int = float(candidate_xs[intercept_index])
     y_int = float(candidate_ys[intercept_index])
     z_int = float(candidate_zs[intercept_index])
-    if t_int < REACTION_MISS_FLIGHT_TIME_THRESHOLD and float(np.random.random()) < REACTION_MISS_PROBABILITY:
+    miss_probability = reaction_miss_probability(t_int, config)
+    if miss_probability > 0.0 and float(np.random.random()) < miss_probability:
         notes.append(
             "Receiver missed a fast shuttle "
-            f"(flight={t_int:.2f}s < {REACTION_MISS_FLIGHT_TIME_THRESHOLD:.2f}s)."
+            f"(flight={t_int:.2f}s, miss_probability={miss_probability:.2f})."
         )
         next_state = replace(
             state,
@@ -621,15 +697,52 @@ def step_stage(
         )
 
     hitter_start = player_position(state, state.current_hitter)
-    hitter_end = move_toward(hitter_start, (validated.applied.x_rec, validated.applied.y_rec), config.player.v_max * t_int)
-    assert isinstance(hitter_end, tuple)
+    hitter_speed = player_velocity(state, state.current_hitter)
+    receiver_start = player_position(state, receiver_side)
+    receiver_speed = player_velocity(state, receiver_side)
+    receiver_reaction_time = reaction_time_for_side(state, receiver_side)
+    receiver_target = intercept_body_target_after_reaction(
+        receiver_start,
+        receiver_speed,
+        (x_int, y_int),
+        receiver_side,
+        config,
+        target_z=z_int,
+        reaction_time=receiver_reaction_time,
+    )
+    hitter_motion = advance_player_toward(
+        hitter_start,
+        hitter_speed,
+        (validated.applied.x_rec, validated.applied.y_rec),
+        t_int,
+        config,
+        stop_when_early=True,
+    )
+    receiver_motion = advance_player_toward(
+        receiver_start,
+        receiver_speed,
+        receiver_target,
+        t_int,
+        config,
+        reaction_time=receiver_reaction_time,
+        stop_when_early=True,
+    )
+    hitter_end = hitter_motion.position
+    hitter_end_speed = hitter_motion.velocity
+    receiver_end_speed = receiver_motion.velocity
+
+    receiver_end = receiver_motion.position
 
     if receiver_side == "left":
-        next_x_left, next_y_left = x_int, y_int
+        next_x_left, next_y_left = receiver_end
         next_x_right, next_y_right = hitter_end
+        next_v_x_left, next_v_y_left = receiver_end_speed
+        next_v_x_right, next_v_y_right = hitter_end_speed
     else:
         next_x_left, next_y_left = hitter_end
-        next_x_right, next_y_right = x_int, y_int
+        next_x_right, next_y_right = receiver_end
+        next_v_x_left, next_v_y_left = hitter_end_speed
+        next_v_x_right, next_v_y_right = receiver_end_speed
 
     next_state = StageState(
         x_left=next_x_left,
@@ -640,6 +753,12 @@ def step_stage(
         x0=x_int,
         y0=y_int,
         z0=z_int,
+        v_x_left=next_v_x_left,
+        v_y_left=next_v_y_left,
+        v_x_right=next_v_x_right,
+        v_y_right=next_v_y_right,
+        reaction_time_left=state.reaction_time_left,
+        reaction_time_right=state.reaction_time_right,
         rally_done=False,
         winner=None,
         stage_index=state.stage_index + 1,

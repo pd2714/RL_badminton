@@ -9,6 +9,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CallbackList
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.save_util import load_from_zip_file
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -22,10 +23,21 @@ from badminton1d.curricula import (
     available_training_curricula,
     build_training_curriculum,
 )
-from badminton1d.policy import MaskedBadmintonPolicy
+from badminton1d.factorized_ppo import RecoveryFactorizedPPO
+from badminton1d.policy import CONTINUOUS_LOG_STD_MAX, CONTINUOUS_LOG_STD_MIN, MIXED_RECOVERY_LOG_STD, MaskedBadmintonPolicy
 from badminton1d.reset_sampling import ResetSamplingConfig
-from badminton1d.reward_shaping import LoopPenaltyConfig, PressureRewardConfig
-from badminton1d.rl_env import RLEnvConfig, RewardConfig
+from badminton1d.reward_shaping import (
+    AttackRewardConfig,
+    DefensiveLiftRewardConfig,
+    LoopPenaltyConfig,
+    NetProximityRewardConfig,
+    OpponentTravelRewardConfig,
+    PressureRewardConfig,
+    ReturnDepthRewardConfig,
+)
+from badminton1d.opponents import make_opponent
+from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig, RewardConfig
+from badminton1d.shot_generators import TacticRuntimeConfig
 from badminton1d.selfplay import (
     CheckpointPool,
     FixedCheckpointOpponent,
@@ -40,6 +52,63 @@ from badminton1d.selfplay import (
 from badminton1d.utils import ensure_directory
 
 
+PREFIX_COMPATIBLE_KEYS = {
+    "mlp_extractor.policy_net.0.weight",
+    "mlp_extractor.value_net.0.weight",
+}
+
+
+def _flag_was_provided(argv: list[str], flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in argv)
+
+
+def load_base_policy_state_compatibly(model: PPO, source_state: dict[str, object], *, source_label: str) -> None:
+    target_state = model.policy.state_dict()
+    copied = 0
+    prefix_copied = 0
+    for key, target_value in target_state.items():
+        source_value = source_state.get(key)
+        if source_value is None:
+            continue
+        if source_value.shape == target_value.shape:
+            target_state[key] = source_value
+            copied += 1
+            continue
+        if (
+            key in PREFIX_COMPATIBLE_KEYS
+            and source_value.ndim == 2
+            and target_value.ndim == 2
+            and source_value.shape[0] == target_value.shape[0]
+        ):
+            if source_value.shape[1] >= target_value.shape[1]:
+                target_state[key] = source_value[:, : target_value.shape[1]]
+                prefix_copied += 1
+            elif target_value.shape[1] - source_value.shape[1] == 4:
+                expanded = target_value.clone()
+                expanded.zero_()
+                expanded[:, :29] = source_value[:, :29]
+                expanded[:, 33:] = source_value[:, 29:]
+                target_state[key] = expanded
+                prefix_copied += 1
+
+    model.policy.load_state_dict(target_state, strict=True)
+    print(
+        f"Loaded compatible base policy parameters from {source_label} "
+        f"({copied} exact tensors, {prefix_copied} input-prefix tensors)."
+    )
+
+
+def load_base_parameters_compatibly(model: PPO, base_model: PPO) -> None:
+    try:
+        model.set_parameters(base_model.get_parameters(), exact_match=False)
+        return
+    except RuntimeError as error:
+        if "size mismatch" not in str(error):
+            raise
+
+    load_base_policy_state_compatibly(model, base_model.policy.state_dict(), source_label="loaded PPO model")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Continue PPO training with self-play or a named curriculum opponent."
@@ -51,15 +120,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mirror-sides", action="store_true")
     parser.add_argument("--mirror-match-fraction", type=float, default=0.25)
     parser.add_argument("--initial-server", choices=("left", "right", "train", "opponent", "random"), default="random")
+    parser.add_argument("--random-service-x", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--selfplay-total-timesteps", type=int, default=100000)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--n-steps", type=int, default=256)
+    parser.add_argument("--n-epochs", type=int, default=10)
     parser.add_argument("--ent-coef", type=float, default=0.02)
     parser.add_argument("--ent-coef-final", type=float, default=0.002)
     parser.add_argument("--n-envs", type=int, default=8)
-    parser.add_argument("--vec-env", choices=("dummy", "subproc"), default="dummy")
+    parser.add_argument("--vec-env", choices=("dummy", "subproc"), default="subproc")
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--save-interval", type=int, default=2000)
     parser.add_argument("--pool-size", type=int, default=6)
@@ -77,9 +148,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--random-start-prob", type=float, default=0.0)
     parser.add_argument("--midrally-start-prob", type=float, default=0.0)
     parser.add_argument("--opponent-serve-start-prob", type=float, default=0.0)
-    parser.add_argument("--reaction-time", type=float, default=0.3)
+    parser.add_argument("--reaction-time", type=float, default=0.15)
     parser.add_argument("--court-mode", choices=("1d", "2d"), default="2d")
-    parser.add_argument("--loop-penalty", type=float, default=0.03)
+    parser.add_argument(
+        "--policy-type",
+        choices=("conditional_prob", "continuous_action", "velocity_oriented", "tactic_oriented", "mixed_discrete_continous"),
+        default="velocity_oriented",
+    )
+    parser.add_argument("--regenerate-lookup-table", action="store_true")
+    parser.add_argument("--lookup-table-dir", type=Path, default=Path("lookup_tables"))
+    parser.add_argument("--loop-penalty", type=float, default=0.1)
     parser.add_argument("--loop-window", type=int, default=4)
     parser.add_argument("--defensive-return-reward", type=float, default=0.0)
     parser.add_argument("--serve-return-reward", type=float, default=0.0)
@@ -88,7 +166,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stage-penalty", type=float, default=0.0)
     parser.add_argument("--stall-penalty", type=float, default=0.0)
     parser.add_argument("--stall-penalty-start", type=int, default=24)
-    parser.add_argument("--pressure-reward-weight", type=float, default=0.05)
+    parser.add_argument("--pressure-reward-weight", type=float, default=0.0)
+    parser.add_argument("--attack-reward-weight", type=float, default=0.0)
+    parser.add_argument("--attack-min-speed", type=float, default=18.0)
+    parser.add_argument("--attack-downward-vz-threshold", type=float, default=0.0)
+    parser.add_argument("--feasible-pressure-reward-weight", type=float, default=0.0)
+    parser.add_argument("--no-feasible-intercept-bonus", type=float, default=0.0)
+    parser.add_argument("--opponent-intercept-continue-penalty", type=float, default=0.0)
+    parser.add_argument("--defensive-lift-reward-weight", type=float, default=0.0)
+    parser.add_argument("--intercept-flight-ratio-reward-weight", type=float, default=0.0)
+    parser.add_argument("--defensive-lift-min-theta-deg", type=float, default=15.0)
+    parser.add_argument("--defensive-lift-target-flight-time", type=float, default=1.4)
+    parser.add_argument("--defensive-lift-min-depth-ratio", type=float, default=0.7)
+    parser.add_argument("--intercept-ratio-min-intended-flight-time", type=float, default=0.8)
+    parser.add_argument("--mask-mid-rally-hitter-actions", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use-recovery-factorized-advantage", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--opponent-travel-reward-weight", type=float, default=0.0)
+    parser.add_argument("--return-depth-reward-weight", type=float, default=0.0)
+    parser.add_argument("--net-proximity-reward-weight", type=float, default=0.0)
+    parser.add_argument("--net-proximity-threshold", type=float, default=0.5)
     parser.add_argument("--eval-freq", type=int, default=5000)
     parser.add_argument("--eval-episodes", type=int, default=12)
     parser.add_argument("--eval-deterministic", action="store_true")
@@ -114,28 +210,65 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no-progress-video-initial-sample", action="store_true")
     parser.add_argument("--tensorboard-log", type=Path, default=Path("outputs/rl/tensorboard"))
-    parser.add_argument("--player-speed", type=float, default=2.6)
+    parser.add_argument("--player-speed", type=float, default=SimulationConfig().player.v_max)
+    parser.add_argument("--racket-length", type=float, default=SimulationConfig().player.r_reach)
+    parser.add_argument("--max-hitting-height", type=float, default=SimulationConfig().player.z_max)
+    parser.add_argument("--movement-model", choices=("constant_velocity", "accelerated"), default=SimulationConfig().player.movement_model)
+    parser.add_argument("--player-acceleration", type=float, default=SimulationConfig().player.acceleration)
+    parser.add_argument("--player-deceleration", type=float, default=None)
     parser.add_argument("--trajectory-mode", choices=("ballistic", "drag", "drag_square"), default="drag_square")
     parser.add_argument("--drag-coefficient", type=float, default=0.2)
     parser.add_argument("--horizontal-drag-coefficient", type=float, default=0.2)
     parser.add_argument("--vertical-drag-coefficient", type=float, default=0.16)
     parser.add_argument("--shuttle-speed-min", type=float, default=0.1)
-    parser.add_argument("--shuttle-speed-max", type=float, default=100.0)
-    parser.add_argument("--intercept-count", type=int, default=50)
-    parser.add_argument("--vx-bins", type=int, default=7)
-    parser.add_argument("--vy-bins", type=int, default=11)
-    parser.add_argument("--vz-bins", type=int, default=7)
-    parser.add_argument("--x-rec-bins", type=int, default=3)
-    parser.add_argument("--y-rec-bins", type=int, default=5)
-    return parser.parse_args()
+    parser.add_argument("--shuttle-speed-max", type=float, default=SimulationConfig().action.vy_max_forward)
+    parser.add_argument("--recovery-x-margin", type=float, default=None)
+    parser.add_argument("--recovery-net-margin", type=float, default=None)
+    parser.add_argument("--recovery-back-margin", type=float, default=None)
+    parser.add_argument("--intercept-count", type=int, default=20)
+    parser.add_argument("--reaction-miss-fast-threshold", type=float, default=SimulationConfig().action.reaction_miss_fast_threshold)
+    parser.add_argument("--reaction-miss-fast-probability", type=float, default=SimulationConfig().action.reaction_miss_fast_probability)
+    parser.add_argument("--reaction-miss-secondary-threshold", type=float, default=SimulationConfig().action.reaction_miss_secondary_threshold)
+    parser.add_argument("--reaction-miss-secondary-probability", type=float, default=SimulationConfig().action.reaction_miss_secondary_probability)
+    parser.add_argument("--reaction-miss-zero-threshold", type=float, default=SimulationConfig().action.reaction_miss_zero_threshold)
+    parser.add_argument("--phi-bins", type=int, default=DiscreteActionConfig().phi_bins)
+    parser.add_argument("--theta-bins", type=int, default=DiscreteActionConfig().theta_bins)
+    parser.add_argument("--speed-bins", type=int, default=DiscreteActionConfig().speed_bins)
+    parser.add_argument("--vx-bins", dest="phi_bins", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--vy-bins", dest="theta_bins", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--vz-bins", dest="speed_bins", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--x-rec-bins", type=int, default=DiscreteActionConfig().x_rec_bins)
+    parser.add_argument("--y-rec-bins", type=int, default=DiscreteActionConfig().y_rec_bins)
+    args = parser.parse_args()
+    argv = sys.argv[1:]
+    if args.court_mode == "1d":
+        if not _flag_was_provided(argv, "--theta-bins") and not _flag_was_provided(argv, "--vy-bins"):
+            args.theta_bins = 15
+        if not _flag_was_provided(argv, "--speed-bins") and not _flag_was_provided(argv, "--vz-bins"):
+            args.speed_bins = 11
+        if not _flag_was_provided(argv, "--y-rec-bins"):
+            args.y_rec_bins = 5
+    return args
 
 
 def build_sim_config(args: argparse.Namespace) -> SimulationConfig:
     horizontal_drag = args.horizontal_drag_coefficient
     vertical_drag = args.vertical_drag_coefficient
+    action_defaults = SimulationConfig().action
+    mixed_recovery = args.policy_type == "mixed_discrete_continous"
+    recovery_x_margin = 0.0 if mixed_recovery and args.recovery_x_margin is None else args.recovery_x_margin
+    recovery_net_margin = 0.0 if mixed_recovery and args.recovery_net_margin is None else args.recovery_net_margin
+    recovery_back_margin = 0.0 if mixed_recovery and args.recovery_back_margin is None else args.recovery_back_margin
     return SimulationConfig(
         court=CourtConfig(mode=args.court_mode),
-        player=PlayerConfig(v_max=args.player_speed),
+        player=PlayerConfig(
+            v_max=args.player_speed,
+            r_reach=args.racket_length,
+            z_max=args.max_hitting_height,
+            acceleration=args.player_acceleration,
+            deceleration=args.player_deceleration,
+            movement_model=args.movement_model,
+        ),
         action=ActionConfig(
             trajectory_mode=args.trajectory_mode,
             drag_coefficient=args.drag_coefficient,
@@ -143,7 +276,21 @@ def build_sim_config(args: argparse.Namespace) -> SimulationConfig:
             vertical_drag_coefficient=vertical_drag,
             vy_min_forward=args.shuttle_speed_min,
             vy_max_forward=args.shuttle_speed_max,
+            recovery_x_margin=(
+                action_defaults.recovery_x_margin if recovery_x_margin is None else recovery_x_margin
+            ),
+            recovery_net_margin=(
+                action_defaults.recovery_net_margin if recovery_net_margin is None else recovery_net_margin
+            ),
+            recovery_back_margin=(
+                action_defaults.recovery_back_margin if recovery_back_margin is None else recovery_back_margin
+            ),
             intercept_count=args.intercept_count,
+            reaction_miss_fast_threshold=args.reaction_miss_fast_threshold,
+            reaction_miss_fast_probability=args.reaction_miss_fast_probability,
+            reaction_miss_secondary_threshold=args.reaction_miss_secondary_threshold,
+            reaction_miss_secondary_probability=args.reaction_miss_secondary_probability,
+            reaction_miss_zero_threshold=args.reaction_miss_zero_threshold,
         )
     )
 
@@ -153,6 +300,8 @@ def build_fixed_checkpoint_opponent(
     checkpoint_path: Path,
     sim_config: SimulationConfig,
     discrete_action_config: DiscreteActionConfig,
+    policy_type: str,
+    tactic_runtime_config: TacticRuntimeConfig,
     seed: int,
     deterministic: bool = False,
     hitter_deterministic: bool | None = None,
@@ -169,10 +318,74 @@ def build_fixed_checkpoint_opponent(
         checkpoint_path=checkpoint_path,
         sim_config=sim_config,
         discrete_action_config=discrete_action_config,
+        policy_type=policy_type,
+        tactic_runtime_config=tactic_runtime_config,
         deterministic=deterministic,
         hitter_deterministic=hitter_deterministic,
         receiver_deterministic=receiver_deterministic,
     )
+
+
+def create_compatible_base_checkpoint(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    sim_config: SimulationConfig,
+    discrete_action_config: DiscreteActionConfig,
+    tactic_runtime_config: TacticRuntimeConfig,
+    reward_config: RewardConfig,
+    reset_sampling_config: ResetSamplingConfig,
+) -> Path:
+    compatible_path = run_dir / "compatible_base_model.zip"
+    env = BadmintonRLEnv(
+        config=sim_config,
+        rl_config=RLEnvConfig(
+            train_side=args.train_side,
+            initial_server=args.initial_server,
+            random_service_x=args.random_service_x,
+            train_reaction_time=args.reaction_time,
+            opponent_reaction_time=args.reaction_time,
+            max_stages_per_rally=args.max_rally_stages,
+            policy_type=args.policy_type,
+            tactic_runtime=tactic_runtime_config,
+            reward=reward_config,
+            reset_sampling=reset_sampling_config,
+        ),
+        discrete_action_config=discrete_action_config,
+        opponent=make_opponent("safe", seed=args.seed + 700_000),
+        seed=args.seed + 700_001,
+    )
+    model = PPO(
+        MaskedBadmintonPolicy,
+        env,
+        policy_kwargs={
+            "sim_config": sim_config,
+            "discrete_action_config": discrete_action_config,
+            "policy_type": args.policy_type,
+            "tactic_runtime_config": tactic_runtime_config,
+            "mask_mid_rally_hitter_actions": args.mask_mid_rally_hitter_actions,
+        },
+        learning_rate=args.learning_rate,
+        gamma=args.gamma,
+        batch_size=8,
+        n_steps=8,
+        ent_coef=args.ent_coef,
+        verbose=0,
+        seed=args.seed,
+    )
+    try:
+        base_model = PPO.load(args.base_checkpoint_path)
+        load_base_parameters_compatibly(model, base_model)
+    except RuntimeError as error:
+        print(f"Falling back to raw checkpoint parameter copy after PPO.load failed: {error}")
+        _, params, _ = load_from_zip_file(args.base_checkpoint_path, device=model.device)
+        policy_state = params.get("policy")
+        if policy_state is None:
+            raise RuntimeError(f"Checkpoint has no policy parameters: {args.base_checkpoint_path}") from error
+        load_base_policy_state_compatibly(model, policy_state, source_label=str(args.base_checkpoint_path))
+    model.save(compatible_path)
+    env.close()
+    return compatible_path
 
 
 def main() -> None:
@@ -187,6 +400,8 @@ def main() -> None:
         raise ValueError("--anchor-eval-interval must be zero or greater")
     if args.n_envs <= 0:
         raise ValueError("--n-envs must be positive")
+    if args.n_epochs <= 0:
+        raise ValueError("--n-epochs must be positive")
     if not 0.0 <= args.mirror_match_fraction <= 1.0:
         raise ValueError("--mirror-match-fraction must be in [0, 1]")
     if args.progress_video_fps <= 0:
@@ -201,6 +416,14 @@ def main() -> None:
         raise ValueError("--stall-penalty must be zero or greater")
     if args.stall_penalty_start < 0:
         raise ValueError("--stall-penalty-start must be zero or greater")
+    if args.defensive_lift_target_flight_time <= 0.0:
+        raise ValueError("--defensive-lift-target-flight-time must be positive")
+    if not -90.0 <= args.defensive_lift_min_theta_deg <= 90.0:
+        raise ValueError("--defensive-lift-min-theta-deg must be in [-90, 90]")
+    if not 0.0 <= args.defensive_lift_min_depth_ratio <= 1.0:
+        raise ValueError("--defensive-lift-min-depth-ratio must be in [0, 1]")
+    if args.intercept_ratio_min_intended_flight_time <= 0.0:
+        raise ValueError("--intercept-ratio-min-intended-flight-time must be positive")
 
     run_dir = args.output_dir
     checkpoint_dir = run_dir / "checkpoint_pool"
@@ -218,21 +441,16 @@ def main() -> None:
     ensure_directory(args.tensorboard_log)
 
     discrete_action_config = DiscreteActionConfig(
-        v_x_bins=args.vx_bins,
-        v_y_bins=args.vy_bins,
-        v_z_bins=args.vz_bins,
+        phi_bins=args.phi_bins,
+        theta_bins=args.theta_bins,
+        speed_bins=args.speed_bins,
         x_rec_bins=args.x_rec_bins,
         y_rec_bins=args.y_rec_bins,
     )
     sim_config = build_sim_config(args)
-    train_pool = CheckpointPool(
-        checkpoint_dir=checkpoint_dir,
-        base_checkpoint_path=args.base_checkpoint_path,
-        pool_size=args.pool_size,
-        sampling_mode=args.opponent_sampling_mode,
-        recency_power=args.checkpoint_recency_power,
-        recent_fraction=0.5,
-        seed=args.seed + 1,
+    tactic_runtime_config = TacticRuntimeConfig(
+        regenerate_lookup_table=args.regenerate_lookup_table,
+        lookup_dir=args.lookup_table_dir,
     )
     reward_config = RewardConfig(
         defensive_return_reward=args.defensive_return_reward,
@@ -243,6 +461,28 @@ def main() -> None:
         stall_penalty_start=args.stall_penalty_start,
         loop_penalty=LoopPenaltyConfig(penalty=args.loop_penalty, window=args.loop_window),
         pressure_reward=PressureRewardConfig(weight=args.pressure_reward_weight),
+        attack_reward=AttackRewardConfig(
+            weight=args.attack_reward_weight,
+            min_speed=args.attack_min_speed,
+            downward_vz_threshold=args.attack_downward_vz_threshold,
+        ),
+        opponent_travel_reward=OpponentTravelRewardConfig(weight=args.opponent_travel_reward_weight),
+        return_depth_reward=ReturnDepthRewardConfig(weight=args.return_depth_reward_weight),
+        net_proximity_reward=NetProximityRewardConfig(
+            weight=args.net_proximity_reward_weight,
+            distance_threshold=args.net_proximity_threshold,
+        ),
+        defensive_lift_reward=DefensiveLiftRewardConfig(
+            weight=args.defensive_lift_reward_weight,
+            intercept_flight_ratio_reward_weight=args.intercept_flight_ratio_reward_weight,
+            min_theta_deg=args.defensive_lift_min_theta_deg,
+            target_flight_time=args.defensive_lift_target_flight_time,
+            min_depth_ratio=args.defensive_lift_min_depth_ratio,
+            min_ratio_intended_flight_time=args.intercept_ratio_min_intended_flight_time,
+        ),
+        feasible_pressure_reward_weight=args.feasible_pressure_reward_weight,
+        no_feasible_intercept_bonus=args.no_feasible_intercept_bonus,
+        opponent_intercept_continue_penalty=args.opponent_intercept_continue_penalty,
     )
     curriculum = None if args.curriculum == "none" else build_training_curriculum(
         args.curriculum,
@@ -251,7 +491,6 @@ def main() -> None:
     effective_initial_server = args.initial_server
     progress_primary_label = "current_vs_newest_checkpoint"
     progress_primary_dir = progress_video_dir / "current_vs_newest_checkpoint"
-    eval_pool = train_pool
     if curriculum is None:
         reset_sampling_config = ResetSamplingConfig(
             random_start_prob=args.random_start_prob,
@@ -272,6 +511,27 @@ def main() -> None:
             opponent_serve_start_prob=1.0,
             defensive_backcourt_curriculum=curriculum.sampler_config,
         )
+
+    effective_base_checkpoint_path = create_compatible_base_checkpoint(
+        args=args,
+        run_dir=run_dir,
+        sim_config=sim_config,
+        discrete_action_config=discrete_action_config,
+        tactic_runtime_config=tactic_runtime_config,
+        reward_config=reward_config,
+        reset_sampling_config=reset_sampling_config,
+    )
+    train_pool = CheckpointPool(
+        checkpoint_dir=checkpoint_dir,
+        base_checkpoint_path=effective_base_checkpoint_path,
+        pool_size=args.pool_size,
+        sampling_mode=args.opponent_sampling_mode,
+        recency_power=args.checkpoint_recency_power,
+        recent_fraction=0.5,
+        seed=args.seed + 1,
+    )
+    eval_pool = train_pool
+    if curriculum is not None:
         eval_pool = CheckpointPool(
             checkpoint_dir=run_dir / "_curriculum_eval_pool",
             base_checkpoint_path=curriculum.opponent_checkpoint_path,
@@ -286,6 +546,8 @@ def main() -> None:
                 checkpoint_path=curriculum.opponent_checkpoint_path,
                 sim_config=sim_config,
                 discrete_action_config=discrete_action_config,
+                policy_type=args.policy_type,
+                tactic_runtime_config=tactic_runtime_config,
                 seed=args.seed + 2 + (1 if include_records else 0),
                 deterministic=False,
                 hitter_deterministic=curriculum.opponent_hitter_deterministic,
@@ -294,7 +556,7 @@ def main() -> None:
         return MixedCheckpointOpponent(
             checkpoint_pool=CheckpointPool(
                 checkpoint_dir=checkpoint_dir,
-                base_checkpoint_path=args.base_checkpoint_path,
+                base_checkpoint_path=effective_base_checkpoint_path,
                 pool_size=args.pool_size,
                 sampling_mode=args.opponent_sampling_mode,
                 recency_power=args.checkpoint_recency_power,
@@ -303,6 +565,8 @@ def main() -> None:
             ),
             sim_config=sim_config,
             discrete_action_config=discrete_action_config,
+            policy_type=args.policy_type,
+            tactic_runtime_config=tactic_runtime_config,
             heuristic_opponent_prob=args.heuristic_opponent_prob,
             recent_weight=args.recent_opponent_weight,
             older_weight=args.older_opponent_weight,
@@ -315,10 +579,13 @@ def main() -> None:
             mirror_train_side=args.mirror_sides,
             mirror_match_fraction=args.mirror_match_fraction,
             initial_server=effective_initial_server,
+            random_service_x=args.random_service_x,
             sim_config=sim_config,
             train_reaction_time=args.reaction_time,
             opponent_reaction_time=args.reaction_time,
             max_stages_per_rally=args.max_rally_stages,
+            policy_type=args.policy_type,
+            tactic_runtime_config=tactic_runtime_config,
             reward_config=reward_config,
             reset_sampling_config=reset_sampling_config,
             seed=args.seed,
@@ -343,6 +610,7 @@ def main() -> None:
         mirror_train_side=args.mirror_sides,
         mirror_match_fraction=args.mirror_match_fraction,
         initial_server=effective_initial_server,
+        random_service_x=args.random_service_x,
         sim_config=sim_config,
         train_reaction_time=args.reaction_time,
         opponent_reaction_time=args.reaction_time,
@@ -356,6 +624,8 @@ def main() -> None:
                 checkpoint_path=curriculum.opponent_checkpoint_path,
                 sim_config=sim_config,
                 discrete_action_config=discrete_action_config,
+                policy_type=args.policy_type,
+                tactic_runtime_config=tactic_runtime_config,
                 seed=args.seed + 50_001,
                 deterministic=args.progress_video_deterministic,
                 hitter_deterministic=curriculum.opponent_hitter_deterministic,
@@ -365,7 +635,7 @@ def main() -> None:
             else FrozenCheckpointOpponent(
                 pool=CheckpointPool(
                     checkpoint_dir=checkpoint_dir,
-                    base_checkpoint_path=args.base_checkpoint_path,
+                    base_checkpoint_path=effective_base_checkpoint_path,
                     pool_size=args.pool_size,
                     sampling_mode="newest",
                     recency_power=args.checkpoint_recency_power,
@@ -374,6 +644,8 @@ def main() -> None:
                 ),
                 sim_config=sim_config,
                 discrete_action_config=discrete_action_config,
+                policy_type=args.policy_type,
+                tactic_runtime_config=tactic_runtime_config,
                 deterministic=args.progress_video_deterministic,
             )
         ),
@@ -384,6 +656,7 @@ def main() -> None:
         mirror_train_side=args.mirror_sides,
         mirror_match_fraction=args.mirror_match_fraction,
         initial_server=effective_initial_server,
+        random_service_x=args.random_service_x,
         sim_config=sim_config,
         train_reaction_time=args.reaction_time,
         opponent_reaction_time=args.reaction_time,
@@ -395,30 +668,43 @@ def main() -> None:
         opponent=LiveModelOpponent(
             sim_config=sim_config,
             discrete_action_config=discrete_action_config,
+            policy_type=args.policy_type,
+            tactic_runtime_config=tactic_runtime_config,
             deterministic=args.progress_video_deterministic,
             label_name="mirror_self",
         ),
         include_records_in_info=True,
     )
 
-    model = PPO(
+    ppo_class = RecoveryFactorizedPPO if args.use_recovery_factorized_advantage else PPO
+    ppo_extra_kwargs = (
+        {"use_recovery_factorized_advantage": True}
+        if args.use_recovery_factorized_advantage
+        else {}
+    )
+    model = ppo_class(
         MaskedBadmintonPolicy,
         train_env,
         policy_kwargs={
             "sim_config": sim_config,
             "discrete_action_config": discrete_action_config,
+            "policy_type": args.policy_type,
+            "tactic_runtime_config": tactic_runtime_config,
+            "mask_mid_rally_hitter_actions": args.mask_mid_rally_hitter_actions,
         },
         learning_rate=args.learning_rate,
         gamma=args.gamma,
         batch_size=args.batch_size,
         n_steps=args.n_steps,
+        n_epochs=args.n_epochs,
         ent_coef=args.ent_coef,
         verbose=1,
         tensorboard_log=str(args.tensorboard_log),
         seed=args.seed,
+        **ppo_extra_kwargs,
     )
-    base_model = PPO.load(args.base_checkpoint_path)
-    model.set_parameters(base_model.get_parameters(), exact_match=False)
+    base_model = PPO.load(effective_base_checkpoint_path)
+    load_base_parameters_compatibly(model, base_model)
 
     diagnostics_callback = RallyDiagnosticsCallback(run_dir)
     callbacks_list = [diagnostics_callback]
@@ -449,6 +735,7 @@ def main() -> None:
         initial_server=effective_initial_server,
         mirror_train_side=args.mirror_sides,
         mirror_match_fraction=args.mirror_match_fraction,
+        random_service_x=args.random_service_x,
         sim_config=sim_config,
         reward_config=reward_config,
         reset_sampling_config=reset_sampling_config,
@@ -456,8 +743,10 @@ def main() -> None:
         opponent_reaction_time=args.reaction_time,
         max_stages_per_rally=args.max_rally_stages,
         discrete_action_config=discrete_action_config,
+        policy_type=args.policy_type,
+        tactic_runtime_config=tactic_runtime_config,
         checkpoint_pool=eval_pool,
-        base_checkpoint_path=args.base_checkpoint_path,
+        base_checkpoint_path=effective_base_checkpoint_path,
         anchor_eval_interval=args.anchor_eval_interval,
         anchor_checkpoint_dir=anchor_checkpoint_dir,
         deterministic=args.eval_deterministic,
@@ -512,19 +801,23 @@ def main() -> None:
 
     train_pool.refresh()
     summary = {
-        "base_checkpoint_path": str(args.base_checkpoint_path),
+        "base_checkpoint_path": str(effective_base_checkpoint_path),
+        "requested_base_checkpoint_path": str(args.base_checkpoint_path),
         "resume_step_offset": args.resume_step_offset,
         "train_side": args.train_side,
         "mirror_sides": args.mirror_sides,
         "mirror_match_fraction": args.mirror_match_fraction,
         "initial_server": effective_initial_server,
         "requested_initial_server": args.initial_server,
+        "random_service_x": args.random_service_x,
         "selfplay_total_timesteps": args.selfplay_total_timesteps,
         "learning_rate": args.learning_rate,
         "gamma": args.gamma,
         "batch_size": args.batch_size,
         "n_steps": args.n_steps,
+        "n_epochs": args.n_epochs,
         "n_envs": args.n_envs,
+        "vec_env": args.vec_env,
         "seed": args.seed,
         "ent_coef": args.ent_coef,
         "ent_coef_final": args.ent_coef_final,
@@ -565,6 +858,12 @@ def main() -> None:
         ),
         "reaction_time": args.reaction_time,
         "court_mode": args.court_mode,
+        "policy_type": args.policy_type,
+        "continuous_log_std_min": CONTINUOUS_LOG_STD_MIN,
+        "continuous_log_std_max": CONTINUOUS_LOG_STD_MAX,
+        "mixed_recovery_log_std": MIXED_RECOVERY_LOG_STD,
+        "regenerate_lookup_table": args.regenerate_lookup_table,
+        "lookup_table_dir": str(args.lookup_table_dir),
         "loop_penalty": args.loop_penalty,
         "loop_window": args.loop_window,
         "defensive_return_reward": args.defensive_return_reward,
@@ -575,6 +874,24 @@ def main() -> None:
         "stall_penalty": args.stall_penalty,
         "stall_penalty_start": args.stall_penalty_start,
         "pressure_reward_weight": args.pressure_reward_weight,
+        "attack_reward_weight": args.attack_reward_weight,
+        "attack_min_speed": args.attack_min_speed,
+        "attack_downward_vz_threshold": args.attack_downward_vz_threshold,
+        "feasible_pressure_reward_weight": args.feasible_pressure_reward_weight,
+        "no_feasible_intercept_bonus": args.no_feasible_intercept_bonus,
+        "opponent_intercept_continue_penalty": args.opponent_intercept_continue_penalty,
+        "defensive_lift_reward_weight": args.defensive_lift_reward_weight,
+        "intercept_flight_ratio_reward_weight": args.intercept_flight_ratio_reward_weight,
+        "defensive_lift_min_theta_deg": args.defensive_lift_min_theta_deg,
+        "defensive_lift_target_flight_time": args.defensive_lift_target_flight_time,
+        "defensive_lift_min_depth_ratio": args.defensive_lift_min_depth_ratio,
+        "intercept_ratio_min_intended_flight_time": args.intercept_ratio_min_intended_flight_time,
+        "mask_mid_rally_hitter_actions": args.mask_mid_rally_hitter_actions,
+        "use_recovery_factorized_advantage": args.use_recovery_factorized_advantage,
+        "opponent_travel_reward_weight": args.opponent_travel_reward_weight,
+        "return_depth_reward_weight": args.return_depth_reward_weight,
+        "net_proximity_reward_weight": args.net_proximity_reward_weight,
+        "net_proximity_threshold": args.net_proximity_threshold,
         "eval_episodes": args.eval_episodes,
         "eval_deterministic": args.eval_deterministic,
         "anchor_eval_interval": args.anchor_eval_interval,
@@ -599,13 +916,31 @@ def main() -> None:
         "progress_video_write_combined_frames": args.progress_video_write_combined_frames,
         "progress_video_write_combined_gif": args.progress_video_write_combined_gif,
         "player_speed": args.player_speed,
+        "racket_length": args.racket_length,
+        "max_hitting_height": args.max_hitting_height,
+        "movement_model": args.movement_model,
+        "player_acceleration": args.player_acceleration,
+        "player_deceleration": args.player_deceleration,
         "trajectory_mode": args.trajectory_mode,
         "drag_coefficient": args.drag_coefficient,
         "horizontal_drag_coefficient": args.horizontal_drag_coefficient,
         "vertical_drag_coefficient": args.vertical_drag_coefficient,
         "shuttle_speed_min": args.shuttle_speed_min,
         "shuttle_speed_max": args.shuttle_speed_max,
+        "recovery_x_margin": sim_config.action.recovery_x_margin,
+        "recovery_net_margin": sim_config.action.recovery_net_margin,
+        "recovery_back_margin": sim_config.action.recovery_back_margin,
         "intercept_count": args.intercept_count,
+        "reaction_miss_fast_threshold": args.reaction_miss_fast_threshold,
+        "reaction_miss_fast_probability": args.reaction_miss_fast_probability,
+        "reaction_miss_secondary_threshold": args.reaction_miss_secondary_threshold,
+        "reaction_miss_secondary_probability": args.reaction_miss_secondary_probability,
+        "reaction_miss_zero_threshold": args.reaction_miss_zero_threshold,
+        "phi_bins": args.phi_bins,
+        "theta_bins": args.theta_bins,
+        "speed_bins": args.speed_bins,
+        "x_rec_bins": args.x_rec_bins,
+        "y_rec_bins": args.y_rec_bins,
     }
     (run_dir / "selfplay_config.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 

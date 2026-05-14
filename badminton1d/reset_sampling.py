@@ -9,7 +9,7 @@ from badminton1d.config import SimulationConfig
 from badminton1d.curricula import DefensiveBackcourtCurriculumConfig, DefensiveBackcourtCurriculumSampler
 from badminton1d.dynamics import feasible_intercept_indices
 from badminton1d.env import Badminton1DEnv
-from badminton1d.match import MatchConfig, default_start_positions, reset_for_serve
+from badminton1d.match import MatchConfig, default_start_positions, reset_for_serve, service_receive_position
 from badminton1d.state import Side, StageState
 from badminton1d.utils import side_y_bounds, x_bounds
 
@@ -79,6 +79,10 @@ class ResetSampler:
     def _sample_randomized_serve_state(self, server: Side) -> StageState:
         base_state = reset_for_serve(server, self.sim_config, self.match_config)
         (left_start_x, left_start_y), (right_start_x, right_start_y) = default_start_positions(self.sim_config)
+        if server == "left":
+            right_start_x, right_start_y = service_receive_position("right", self.sim_config)
+        else:
+            left_start_x, left_start_y = service_receive_position("left", self.sim_config)
         x_low, x_high = x_bounds(self.sim_config)
         left_y_low, left_y_high = side_y_bounds("left", self.sim_config)
         right_y_low, right_y_high = side_y_bounds("right", self.sim_config)

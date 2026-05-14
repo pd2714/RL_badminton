@@ -7,7 +7,7 @@ from badminton1d.config import SimulationConfig
 from badminton1d.dynamics import feasible_intercept_indices, validate_and_clip_shot_action
 from badminton1d.env import Badminton1DEnv
 from badminton1d.state import Side, StageRecord, StageState
-from badminton1d.utils import default_player_position, opponent_side, side_center_y
+from badminton1d.utils import default_player_position, opponent_side, service_court_x, side_center_y
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,17 @@ def default_start_positions(config: SimulationConfig) -> tuple[tuple[float, floa
     return default_player_position("left", config), default_player_position("right", config)
 
 
+def service_receive_position(side: Side, config: SimulationConfig) -> tuple[float, float]:
+    x, y = default_player_position(side, config)
+    if not config.court.lateral_motion_enabled:
+        return x, y
+
+    offset = config.court.service_receive_x_offset_toward_center
+    if side == "left":
+        return min(x + offset, 0.0), y
+    return max(x - offset, 0.0), y
+
+
 def service_line_positions(config: SimulationConfig) -> tuple[float, float]:
     line_distance = config.court.service_line_distance_from_net
     return config.court.net_y - line_distance, config.court.net_y + line_distance
@@ -80,11 +91,15 @@ def serve_positions(
     default_left, default_right = default_start_positions(config)
     active_match_config = match_config or MatchConfig()
     left_position = (
-        default_left[0] if active_match_config.left_service_x is None else active_match_config.left_service_x,
+        service_court_x("left", config)
+        if active_match_config.left_service_x is None
+        else active_match_config.left_service_x,
         default_left[1] if active_match_config.left_service_y is None else active_match_config.left_service_y,
     )
     right_position = (
-        default_right[0] if active_match_config.right_service_x is None else active_match_config.right_service_x,
+        service_court_x("right", config)
+        if active_match_config.right_service_x is None
+        else active_match_config.right_service_x,
         default_right[1] if active_match_config.right_service_y is None else active_match_config.right_service_y,
     )
     return left_position, right_position
@@ -98,8 +113,14 @@ def reset_for_serve(
     active_match_config = match_config or MatchConfig()
     (left_x, left_y), (right_x, right_y) = serve_positions(config, active_match_config)
     if server == "left":
+        default_right_receive_x, default_right_receive_y = service_receive_position("right", config)
+        right_x = default_right_receive_x if active_match_config.right_service_x is None else right_x
+        right_y = default_right_receive_y if active_match_config.right_service_y is None else right_y
         x0, y0 = left_x, left_y
     else:
+        default_left_receive_x, default_left_receive_y = service_receive_position("left", config)
+        left_x = default_left_receive_x if active_match_config.left_service_x is None else left_x
+        left_y = default_left_receive_y if active_match_config.left_service_y is None else left_y
         x0, y0 = right_x, right_y
     return StageState(
         x_left=left_x,
@@ -114,6 +135,21 @@ def reset_for_serve(
         winner=None,
         stage_index=0,
     )
+
+
+def with_service_court_x_side(
+    state: StageState,
+    config: SimulationConfig,
+    *,
+    server_x_side: Side,
+) -> StageState:
+    if not config.court.lateral_motion_enabled:
+        return state
+    server_x = service_court_x(server_x_side, config)
+    receiver_x, _ = service_receive_position(opponent_side(server_x_side), config)
+    if state.current_hitter == "left":
+        return replace(state, x_left=server_x, x_right=receiver_x, x0=server_x)
+    return replace(state, x_left=receiver_x, x_right=server_x, x0=server_x)
 
 
 def run_rally(

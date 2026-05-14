@@ -72,7 +72,7 @@ The latest RL runs in this repo use:
 - `trajectory_mode=drag_square`
 - `horizontal_drag_coefficient=0.2`
 - `vertical_drag_coefficient=0.16`
-- `intercept_count=50`
+- `intercept_count=20`
 - `court-mode 1d` for the April 2026 self-play and defense-curriculum checkpoints
 
 Clean helpers are available in `badminton1d/trajectory.py` and `badminton1d/dynamics.py` for:
@@ -167,13 +167,14 @@ Observation now includes:
 - pending hitter action features for receiver turns
 - feasible intercept mask
 
-Discrete hitter actions now discretize:
+Velocity-oriented hitter actions now discretize:
 
-- `v_x`
-- `v_y`
-- `v_z`
-- `x_rec`
-- `y_rec`
+- in 2D: horizontal angle `phi`, vertical launch angle `theta`, total speed `v`, `x_rec`, and `y_rec`
+- in 1D: down-court speed `v_y`, `v_z`, and `y_rec`
+
+The default 2D velocity action space uses `11` `phi` bins between the contact point's rays to the two net ends, `8` nonlinearly spaced `theta` bins from the straight-line net-clearance angle up to `65` degrees, `11` `speed` bins, and the center `3x3` recovery cells from a `5x5` recovery lattice. The CLI/config names are `--phi-bins`, `--theta-bins`, and `--speed-bins`.
+
+The PPO interface remains a flat `Discrete` action over full combinations, with action ids decoded in `phi -> theta -> v -> recovery` order.
 
 ## Tests
 
@@ -222,6 +223,18 @@ Trajectory slider:
 python3 scripts/demo_trajectory_slider.py
 ```
 
+Discrete 2D action-space trajectory slider for the May 5 self-play run:
+
+```bash
+python3 scripts/demo_action_space_trajectory_slider.py
+```
+
+Continuous 2D action-space-style trajectory slider:
+
+```bash
+python3 scripts/demo_continuous_action_space_trajectory_slider.py
+```
+
 1D side-view trajectory slider:
 
 ```bash
@@ -232,9 +245,9 @@ Save a slider snapshot:
 
 ```bash
 python3 scripts/demo_trajectory_slider.py \
-  --vx-init 0.8 \
-  --vy-init 5.5 \
-  --vz-init 5.0 \
+  --phi-init 90 \
+  --theta-init 35 \
+  --v-init 8 \
   --kh-init 0.18 \
   --kv-init 0.42 \
   --save-path outputs/demo_trajectory_launch_slider.png \
@@ -246,12 +259,16 @@ python3 scripts/demo_trajectory_slider.py \
 Current PPO defaults in `scripts/train_ppo.py` are tuned around the drag-square trajectory model and the latest self-play protocol:
 
 - `trajectory_mode=drag_square`
-- `reaction_time=0.3`
-- `player_speed=2.6`
-- `intercept_count=50`
+- `reaction_time=0.15`
+- `player_speed=4.0`
+- `movement_model=accelerated`
+- `player_acceleration=6.5`
+- `racket_length=1.3`
+- `max_hitting_height=2.6`
+- `intercept_count=20`
 - `mirror_match_fraction=0.25`
 - `loop_penalty=0.03` with `loop_window=4`
-- `pressure_reward_weight=0.05`
+- `pressure_reward_weight=0.01`
 - `max_rally_stages=120`
 - `n_envs=8`
 - `initial_server=random`
@@ -290,10 +307,11 @@ The self-play trainer in `scripts/train_selfplay.py` now defaults to:
 - saving checkpoint-pool snapshots every `2000` timesteps
 - evaluating `current_vs_newest_checkpoint` every `5000` timesteps by default
 - keeping mirror-side training active for `25%` of episodes unless overridden with `--mirror-match-fraction`
-- using `drag_square`, `reaction_time=0.3`, `player_speed=2.6`, and `intercept_count=50`
+- using `drag_square`, `reaction_time=0.15`, `player_speed=4.0`, `movement_model=accelerated`, `player_acceleration=6.5`, `racket_length=1.3`, `max_hitting_height=2.6`, and `intercept_count=20`
 - capping rallies at `120` stages with `max_rally_penalty=1.0`
-- using loop-penalty shaping (`0.03`, window `4`) plus pressure reward (`0.05`)
+- using loop-penalty shaping (`0.1`, window `4`), with pressure and defensive-shot rewards off by default
 - leaving `stage_penalty` and `stall_penalty` off by default unless explicitly enabled
+- leaving mid-rally hitter action masking off by default; pass `--mask-mid-rally-hitter-actions` to re-enable strict masking
 - not recording training-progress videos unless `--progress-video-freq` is enabled
 - using the side-view 1D visualization when `--court-mode 1d` is selected
 
@@ -315,8 +333,8 @@ python3 scripts/train_selfplay.py \
   --output-dir outputs/rl/selfplay_1d_dragsquare_defense_curriculum_20260420_100k \
   --court-mode 1d \
   --trajectory-mode drag_square \
-  --reaction-time 0.3 \
-  --intercept-count 50
+  --reaction-time 0.15 \
+  --intercept-count 20
 ```
 
 That preset:

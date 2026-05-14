@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import candidate_intercept_points, feasible_intercept_indices, valid_hitter_action
+from badminton1d.config import ActionConfig, SimulationConfig
+from badminton1d.dynamics import candidate_intercept_points, feasible_intercept_indices, trajectory_result, valid_hitter_action
 from badminton1d.state import ShotAction, StageState
 from badminton1d.trajectory import (
     ballistic_landing_time,
@@ -116,6 +116,68 @@ class TrajectoryTests(unittest.TestCase):
         self.assertGreaterEqual(zs[first], self.config.player.z_min)
         self.assertLessEqual(zs[first], self.config.player.z_max)
         self.assertNotEqual(xs[first], self.state.x_right)
+
+    def test_candidate_intercepts_start_after_net_crossing(self) -> None:
+        action = ShotAction(v_x=0.8, v_y=5.4, v_z=5.0, x_rec=0.0, y_rec=-2.0)
+        crossing = ballistic_net_crossing(
+            self.state.x0,
+            self.state.y0,
+            self.state.z0,
+            action.v_x,
+            action.v_y,
+            action.v_z,
+            self.config.court.net_y,
+            g=self.config.action.gravity,
+        )
+        self.assertIsNotNone(crossing)
+        assert crossing is not None
+
+        ballistic_times, *_ = candidate_intercept_points(self.state, action, self.config)
+        self.assertTrue(ballistic_times.size > 0)
+        self.assertGreater(float(ballistic_times[0]), crossing.t)
+
+        drag_config = SimulationConfig(action=ActionConfig(trajectory_mode="drag_square", intercept_count=20))
+        drag_result = trajectory_result(self.state, action, drag_config)
+        self.assertIsNotNone(drag_result.net_crossing)
+        assert drag_result.net_crossing is not None
+        drag_times, *_ = candidate_intercept_points(self.state, action, drag_config)
+        self.assertTrue(drag_times.size > 0)
+        self.assertGreater(float(drag_times[0]), drag_result.net_crossing.t)
+
+    def test_net_crossing_overrides_intercept_time_min(self) -> None:
+        action = ShotAction(v_x=0.8, v_y=5.4, v_z=5.0, x_rec=0.0, y_rec=-2.0)
+        config = SimulationConfig(action=ActionConfig(intercept_time_min=10.0))
+
+        crossing = ballistic_net_crossing(
+            self.state.x0,
+            self.state.y0,
+            self.state.z0,
+            action.v_x,
+            action.v_y,
+            action.v_z,
+            config.court.net_y,
+            g=config.action.gravity,
+        )
+        self.assertIsNotNone(crossing)
+        assert crossing is not None
+
+        times, *_ = candidate_intercept_points(self.state, action, config)
+
+        self.assertTrue(times.size > 0)
+        self.assertAlmostEqual(float(times[0]), crossing.t + 1e-6)
+
+    def test_drag_net_crossing_overrides_intercept_time_min(self) -> None:
+        action = ShotAction(v_x=0.8, v_y=5.4, v_z=5.0, x_rec=0.0, y_rec=-2.0)
+        config = SimulationConfig(action=ActionConfig(trajectory_mode="drag_square", intercept_time_min=10.0))
+        result = trajectory_result(self.state, action, config)
+        self.assertIsNotNone(result.net_crossing)
+        assert result.net_crossing is not None
+
+        times, *_ = candidate_intercept_points(self.state, action, config)
+
+        self.assertTrue(times.size > 0)
+        self.assertGreater(float(times[0]), result.net_crossing.t)
+        self.assertLess(float(times[0]), 10.0)
 
 
 if __name__ == "__main__":

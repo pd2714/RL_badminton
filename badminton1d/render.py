@@ -4,8 +4,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import imageio.v2 as imageio
-import matplotlib
 import numpy as np
+
+from badminton1d.mpl_config import ensure_writable_matplotlib_config
+
+ensure_writable_matplotlib_config()
+
+import matplotlib
 
 matplotlib.use("Agg")
 
@@ -37,6 +42,7 @@ class ScoreboardOverlay:
     rally_number: int
     stage_number: int
     hitter_side: Side
+    shot_text: str | None = None
     flight_time_text: str | None = None
     intercept_text: str | None = None
     point_winner: Side | None = None
@@ -106,11 +112,11 @@ def stage_colors(monochrome: bool) -> dict[str, str]:
         "service_line": "#ffffff",
         "net": "#111827",
         "left_player": "#2563eb",
-        "right_player": "#16a34a",
+        "right_player": "#db2777",
         "left_label": "#1d4ed8",
-        "right_label": "#15803d",
+        "right_label": "#be185d",
         "player_arrow": "#ea580c",
-        "trajectory": "#64748b",
+        "trajectory": "#dc2626",
         "start": "#dc2626",
         "target": "#f8fafc",
         "recovery": "#7c3aed",
@@ -131,6 +137,8 @@ def draw_scoreboard_overlay(
         f"stage {overlay.stage_number}",
         f"hitter {_side_label(overlay.hitter_side)}",
     ]
+    if overlay.shot_text is not None:
+        lines.append(overlay.shot_text)
     if overlay.flight_time_text is not None:
         lines.append(overlay.flight_time_text)
     if overlay.intercept_text is not None:
@@ -142,15 +150,15 @@ def draw_scoreboard_overlay(
 
     text_fn = ax.text2D if hasattr(ax, "text2D") else ax.text
     text_fn(
-        0.015,
-        0.98,
+        0.14,
+        0.91,
         "\n".join(lines),
         transform=ax.transAxes,
         ha="left",
         va="top",
-        fontsize=10,
+        fontsize=9,
         color=colors["notes"],
-        bbox={"facecolor": "white", "alpha": 0.82, "edgecolor": "none", "pad": 4.0},
+        bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none", "pad": 1.8},
     )
 
 
@@ -256,14 +264,15 @@ def setup_3d_court_axes(
 ) -> None:
     if hasattr(ax, "computed_zorder"):
         ax.computed_zorder = False
-    pad = config.render.court_padding
+    pad = config.render.court_padding * 0.06
     display_half_width = max(config.court.half_width, OFFICIAL_DOUBLES_WIDTH / 2.0)
-    x_min = -display_half_width - pad
-    x_max = display_half_width + pad
-    y_min = -config.court.half_length - pad
-    y_max = config.court.half_length + pad
+    cropped_half_width = display_half_width * 0.18
+    x_min = -cropped_half_width - pad
+    x_max = cropped_half_width + pad
+    y_min = -config.court.half_length - pad * 0.18
+    y_max = config.court.half_length + pad * 0.18
     z_min = COURT_SURFACE_Z - 0.01
-    z_max = config.render.z_max + 0.3
+    z_max = config.render.z_max * 0.66
 
     court_surface = Poly3DCollection(
         [[
@@ -319,7 +328,9 @@ def setup_3d_court_axes(
     ax.set_ylim(y_min, y_max)
     ax.set_zlim(z_min, z_max)
     ax.set_box_aspect((x_max - x_min, y_max - y_min, z_max - z_min))
-    ax.view_init(elev=22.0, azim=-58.0)
+    ax.view_init(elev=10.0, azim=-69.0)
+    if hasattr(ax, "dist"):
+        ax.dist = 6.2
     ax.grid(False)
 
     for axis in (getattr(ax, "xaxis", None), getattr(ax, "yaxis", None), getattr(ax, "zaxis", None)):
@@ -478,14 +489,23 @@ def _draw_contact_arrow(
     player_xy: tuple[float, float],
     contact_xy: tuple[float, float] | None,
     color: str,
+    max_length: float | None = None,
 ) -> None:
     if contact_xy is None:
         return
     if np.allclose(player_xy, contact_xy):
         return
+    end_xy = contact_xy
+    if max_length is not None:
+        start = np.asarray(player_xy, dtype=float)
+        end = np.asarray(contact_xy, dtype=float)
+        delta = end - start
+        distance = float(np.linalg.norm(delta))
+        if distance > max(float(max_length), 0.0) > 0.0:
+            end_xy = tuple((start + delta * (float(max_length) / distance)).tolist())
     arrow = FancyArrowPatch(
         player_xy,
-        contact_xy,
+        end_xy,
         arrowstyle="-|>",
         mutation_scale=12.0,
         linewidth=1.8,
@@ -513,8 +533,20 @@ def draw_players(
     right_circle = Circle(right_position, radius=radius, facecolor=colors["right_player"], edgecolor="white", linewidth=1.0, zorder=3)
     ax.add_patch(left_circle)
     ax.add_patch(right_circle)
-    _draw_contact_arrow(ax, player_xy=left_position, contact_xy=left_contact_xy, color=colors["player_arrow"])
-    _draw_contact_arrow(ax, player_xy=right_position, contact_xy=right_contact_xy, color=colors["player_arrow"])
+    _draw_contact_arrow(
+        ax,
+        player_xy=left_position,
+        contact_xy=left_contact_xy,
+        color=colors["player_arrow"],
+        max_length=config.player.r_reach,
+    )
+    _draw_contact_arrow(
+        ax,
+        player_xy=right_position,
+        contact_xy=right_contact_xy,
+        color=colors["player_arrow"],
+        max_length=config.player.r_reach,
+    )
     if show_player_labels:
         ax.text(left_position[0], left_position[1] + 0.35, "L", color=colors["left_label"], ha="center", fontsize=11, weight="bold")
         ax.text(right_position[0], right_position[1] + 0.35, "R", color=colors["right_label"], ha="center", fontsize=11, weight="bold")
@@ -553,7 +585,7 @@ def _draw_stage(
             left_contact_xyz=left_contact,
             right_contact_xyz=right_contact,
         )
-        ax.plot(xs, ys, zs, linestyle="--", color=colors["trajectory"], linewidth=1.8, alpha=0.85, zorder=2)
+        ax.plot(xs, ys, zs, linestyle="--", color=colors["trajectory"], linewidth=2.8, alpha=0.9, zorder=2)
         ax.scatter([state.x0], [state.y0], [state.z0], color=colors["start"], s=_shuttle_marker_size(state.z0, config), zorder=7)
 
         if record.terminal_reason != "opponent_no_valid_shot":
@@ -584,7 +616,7 @@ def _draw_stage(
             left_contact_xy=left_contact,
             right_contact_xy=right_contact,
         )
-        ax.plot(xs, ys, linestyle="--", color=colors["trajectory"], linewidth=1.8, alpha=0.85, zorder=1)
+        ax.plot(xs, ys, linestyle="--", color=colors["trajectory"], linewidth=2.8, alpha=0.9, zorder=1)
         ax.scatter([state.x0], [state.y0], color=colors["start"], s=_shuttle_marker_size(state.z0, config), zorder=5)
 
         if record.terminal_reason != "opponent_no_valid_shot":

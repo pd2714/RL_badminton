@@ -19,11 +19,19 @@ from badminton1d.opponents import DecisionContext, OpponentPolicy, make_opponent
 from badminton1d.playback import build_rally_trace, rally_trace_to_dict
 from badminton1d.reset_sampling import ResetSamplingConfig
 from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig, RewardConfig
+from badminton1d.shot_generators import TacticRuntimeConfig
 from badminton1d.state import ShotAction, Side, StageState
 from badminton1d.utils import ensure_directory
 from badminton1d.video import TrainingProgressSample, export_rally_video, export_training_progress_video
 
 _STEP_PATTERN = re.compile(r"(\d+)")
+
+
+def _model_action_value(action: Any) -> Any:
+    arr = np.asarray(action)
+    if arr.shape == ():
+        return int(arr)
+    return arr.astype(np.float32, copy=False)
 
 
 def _checkpoint_sort_key(path: Path) -> tuple[int, float, str]:
@@ -174,6 +182,8 @@ class FrozenCheckpointOpponent(OpponentPolicy):
     pool: CheckpointPool
     sim_config: SimulationConfig
     discrete_action_config: DiscreteActionConfig
+    policy_type: str = "velocity_oriented"
+    tactic_runtime_config: TacticRuntimeConfig = field(default_factory=TacticRuntimeConfig)
     observation_config: ObservationConfig = field(default_factory=ObservationConfig)
     deterministic: bool = False
     hitter_deterministic: bool | None = None
@@ -185,7 +195,12 @@ class FrozenCheckpointOpponent(OpponentPolicy):
     current_side: Side = field(default="right", init=False)
 
     def __post_init__(self) -> None:
-        self.action_mapper = DiscreteActionMapper(self.sim_config, self.discrete_action_config)
+        self.action_mapper = DiscreteActionMapper(
+            self.sim_config,
+            self.discrete_action_config,
+            policy_type=self.policy_type,
+            tactic_runtime_config=self.tactic_runtime_config,
+        )
         self.observation_encoder = ObservationEncoder(self.sim_config, self.observation_config)
 
     def on_episode_start(
@@ -216,7 +231,7 @@ class FrozenCheckpointOpponent(OpponentPolicy):
             pending_action=None,
             feasible_indices=[],
         )
-        decoded = self.action_mapper.decode_hitter(action, state).shot_action
+        decoded = self.action_mapper.decode_hitter_for_agent(action, state, self.current_side).shot_action
         return self.action_mapper.project_hitter_action(state, decoded).shot_action
 
     def choose_intercept_index(
@@ -270,7 +285,7 @@ class FrozenCheckpointOpponent(OpponentPolicy):
             feasible_indices=feasible_indices,
         )
         action, _ = self.current_model.predict(observation, deterministic=self._deterministic_for_role(role))
-        return int(action)
+        return _model_action_value(action)
 
     def _deterministic_for_role(self, role: str) -> bool:
         if role == "hitter" and self.hitter_deterministic is not None:
@@ -304,6 +319,8 @@ class LiveModelOpponent(OpponentPolicy):
     sim_config: SimulationConfig
     discrete_action_config: DiscreteActionConfig
     model: PPO | None = None
+    policy_type: str = "velocity_oriented"
+    tactic_runtime_config: TacticRuntimeConfig = field(default_factory=TacticRuntimeConfig)
     observation_config: ObservationConfig = field(default_factory=ObservationConfig)
     deterministic: bool = False
     hitter_deterministic: bool | None = None
@@ -314,7 +331,12 @@ class LiveModelOpponent(OpponentPolicy):
     current_side: Side = field(default="right", init=False)
 
     def __post_init__(self) -> None:
-        self.action_mapper = DiscreteActionMapper(self.sim_config, self.discrete_action_config)
+        self.action_mapper = DiscreteActionMapper(
+            self.sim_config,
+            self.discrete_action_config,
+            policy_type=self.policy_type,
+            tactic_runtime_config=self.tactic_runtime_config,
+        )
         self.observation_encoder = ObservationEncoder(self.sim_config, self.observation_config)
 
     def set_model(self, model: PPO) -> None:
@@ -344,7 +366,7 @@ class LiveModelOpponent(OpponentPolicy):
             pending_action=None,
             feasible_indices=[],
         )
-        decoded = self.action_mapper.decode_hitter(action, state).shot_action
+        decoded = self.action_mapper.decode_hitter_for_agent(action, state, self.current_side).shot_action
         return self.action_mapper.project_hitter_action(state, decoded).shot_action
 
     def choose_intercept_index(
@@ -398,7 +420,7 @@ class LiveModelOpponent(OpponentPolicy):
             feasible_indices=feasible_indices,
         )
         action, _ = self.model.predict(observation, deterministic=self._deterministic_for_role(role))
-        return int(action)
+        return _model_action_value(action)
 
     def _deterministic_for_role(self, role: str) -> bool:
         if role == "hitter" and self.hitter_deterministic is not None:
@@ -413,6 +435,8 @@ class MixedCheckpointOpponent(OpponentPolicy):
     checkpoint_pool: CheckpointPool
     sim_config: SimulationConfig
     discrete_action_config: DiscreteActionConfig
+    policy_type: str = "velocity_oriented"
+    tactic_runtime_config: TacticRuntimeConfig = field(default_factory=TacticRuntimeConfig)
     heuristic_opponent_prob: float = 0.05
     recent_weight: float = 0.6
     older_weight: float = 0.4
@@ -430,7 +454,12 @@ class MixedCheckpointOpponent(OpponentPolicy):
     active_bucket: str = field(default="recent", init=False)
 
     def __post_init__(self) -> None:
-        self.action_mapper = DiscreteActionMapper(self.sim_config, self.discrete_action_config)
+        self.action_mapper = DiscreteActionMapper(
+            self.sim_config,
+            self.discrete_action_config,
+            policy_type=self.policy_type,
+            tactic_runtime_config=self.tactic_runtime_config,
+        )
         self.observation_encoder = ObservationEncoder(self.sim_config, self.observation_config)
 
     def on_episode_start(
@@ -488,7 +517,7 @@ class MixedCheckpointOpponent(OpponentPolicy):
             observation,
             deterministic=self._deterministic_for_role("hitter"),
         )
-        decoded = self.action_mapper.decode_hitter(int(action), state).shot_action
+        decoded = self.action_mapper.decode_hitter_for_agent(_model_action_value(action), state, self.current_side).shot_action
         return self.action_mapper.project_hitter_action(state, decoded).shot_action
 
     def choose_intercept_index(
@@ -598,7 +627,10 @@ class SelfPlayEvalCallback(BaseCallback):
         opponent_reaction_time: float,
         max_stages_per_rally: int,
         discrete_action_config: DiscreteActionConfig,
+        policy_type: str,
+        tactic_runtime_config: TacticRuntimeConfig,
         checkpoint_pool: CheckpointPool,
+        random_service_x: bool = False,
         base_checkpoint_path: Path | None = None,
         anchor_eval_interval: int = 0,
         anchor_checkpoint_dir: Path | None = None,
@@ -617,6 +649,7 @@ class SelfPlayEvalCallback(BaseCallback):
         self.initial_server = initial_server
         self.mirror_train_side = mirror_train_side
         self.mirror_match_fraction = mirror_match_fraction
+        self.random_service_x = bool(random_service_x)
         self.sim_config = sim_config
         self.reward_config = reward_config
         self.reset_sampling_config = reset_sampling_config
@@ -624,6 +657,8 @@ class SelfPlayEvalCallback(BaseCallback):
         self.opponent_reaction_time = float(opponent_reaction_time)
         self.max_stages_per_rally = int(max_stages_per_rally)
         self.discrete_action_config = discrete_action_config
+        self.policy_type = policy_type
+        self.tactic_runtime_config = tactic_runtime_config
         self.checkpoint_pool = checkpoint_pool
         self.base_checkpoint_path = None if base_checkpoint_path is None else base_checkpoint_path.resolve()
         self.anchor_eval_interval = int(anchor_eval_interval)
@@ -783,9 +818,12 @@ class SelfPlayEvalCallback(BaseCallback):
                     initial_server=self.initial_server,
                     mirror_train_side=self.mirror_train_side,
                     mirror_match_fraction=self.mirror_match_fraction,
+                    random_service_x=self.random_service_x,
                     train_reaction_time=self.train_reaction_time,
                     opponent_reaction_time=self.opponent_reaction_time,
                     max_stages_per_rally=self.max_stages_per_rally,
+                    policy_type=self.policy_type,
+                    tactic_runtime=self.tactic_runtime_config,
                     reset_sampling=self.reset_sampling_config,
                     reward=self.reward_config,
                 ),
@@ -806,6 +844,8 @@ class SelfPlayEvalCallback(BaseCallback):
             mirror_opponent = LiveModelOpponent(
                 sim_config=self.sim_config,
                 discrete_action_config=self.discrete_action_config,
+                policy_type=self.policy_type,
+                tactic_runtime_config=self.tactic_runtime_config,
                 model=self.model,
                 deterministic=self.deterministic,
                 label_name="mirror_self",
@@ -815,12 +855,15 @@ class SelfPlayEvalCallback(BaseCallback):
                 mirror_train_side=self.mirror_train_side,
                 mirror_match_fraction=self.mirror_match_fraction,
                 initial_server=self.initial_server,
+                random_service_x=self.random_service_x,
                 sim_config=self.sim_config,
                 train_reaction_time=self.train_reaction_time,
                 opponent_reaction_time=self.opponent_reaction_time,
                 max_stages_per_rally=self.max_stages_per_rally,
                 reward_config=self.reward_config,
                 reset_sampling_config=self.reset_sampling_config,
+                policy_type=self.policy_type,
+                tactic_runtime_config=self.tactic_runtime_config,
                 seed=base_seed + 11,
                 discrete_action_config=self.discrete_action_config,
                 opponent=mirror_opponent,
@@ -833,12 +876,15 @@ class SelfPlayEvalCallback(BaseCallback):
                     mirror_train_side=self.mirror_train_side,
                     mirror_match_fraction=self.mirror_match_fraction,
                     initial_server=server,
+                    random_service_x=self.random_service_x,
                     sim_config=self.sim_config,
                     train_reaction_time=self.train_reaction_time,
                     opponent_reaction_time=self.opponent_reaction_time,
                     max_stages_per_rally=self.max_stages_per_rally,
                     reward_config=self.reward_config,
                     reset_sampling_config=self.reset_sampling_config,
+                    policy_type=self.policy_type,
+                    tactic_runtime_config=self.tactic_runtime_config,
                     seed=base_seed + 11,
                     discrete_action_config=self.discrete_action_config,
                     opponent=mirror_opponent,
@@ -859,12 +905,15 @@ class SelfPlayEvalCallback(BaseCallback):
                         mirror_train_side=self.mirror_train_side,
                         mirror_match_fraction=self.mirror_match_fraction,
                         initial_server=server,
+                        random_service_x=self.random_service_x,
                         sim_config=self.sim_config,
                         train_reaction_time=self.train_reaction_time,
                         opponent_reaction_time=self.opponent_reaction_time,
                         max_stages_per_rally=self.max_stages_per_rally,
                         reward_config=self.reward_config,
                         reset_sampling_config=self.reset_sampling_config,
+                        policy_type=self.policy_type,
+                        tactic_runtime_config=self.tactic_runtime_config,
                         seed=base_seed + 3,
                         discrete_action_config=self.discrete_action_config,
                         opponent=FixedCheckpointOpponent(
@@ -872,6 +921,8 @@ class SelfPlayEvalCallback(BaseCallback):
                             checkpoint_path=newest,
                             sim_config=self.sim_config,
                             discrete_action_config=self.discrete_action_config,
+                            policy_type=self.policy_type,
+                            tactic_runtime_config=self.tactic_runtime_config,
                             deterministic=self.deterministic,
                         ),
                     ),
@@ -888,12 +939,15 @@ class SelfPlayEvalCallback(BaseCallback):
                     mirror_train_side=self.mirror_train_side,
                     mirror_match_fraction=self.mirror_match_fraction,
                     initial_server=server,
+                    random_service_x=self.random_service_x,
                     sim_config=self.sim_config,
                     train_reaction_time=self.train_reaction_time,
                     opponent_reaction_time=self.opponent_reaction_time,
                     max_stages_per_rally=self.max_stages_per_rally,
                     reward_config=self.reward_config,
                     reset_sampling_config=self.reset_sampling_config,
+                    policy_type=self.policy_type,
+                    tactic_runtime_config=self.tactic_runtime_config,
                     seed=base_seed + 7,
                     discrete_action_config=self.discrete_action_config,
                     opponent=FixedCheckpointOpponent(
@@ -901,6 +955,8 @@ class SelfPlayEvalCallback(BaseCallback):
                         checkpoint_path=self.current_anchor_path,
                         sim_config=self.sim_config,
                         discrete_action_config=self.discrete_action_config,
+                        policy_type=self.policy_type,
+                        tactic_runtime_config=self.tactic_runtime_config,
                         deterministic=self.deterministic,
                     ),
                 ),
@@ -1124,10 +1180,13 @@ def build_selfplay_env(
     mirror_train_side: bool,
     mirror_match_fraction: float = 0.0,
     initial_server: str,
+    random_service_x: bool = False,
     sim_config: SimulationConfig | None = None,
     train_reaction_time: float = 0.0,
     opponent_reaction_time: float = 0.0,
     max_stages_per_rally: int = 30,
+    policy_type: str = "velocity_oriented",
+    tactic_runtime_config: TacticRuntimeConfig | None = None,
     reward_config: RewardConfig | None = None,
     reset_sampling_config: ResetSamplingConfig | None = None,
     seed: int,
@@ -1146,6 +1205,9 @@ def build_selfplay_env(
             include_records_in_info=include_records_in_info,
             mirror_train_side=mirror_train_side,
             mirror_match_fraction=mirror_match_fraction,
+            random_service_x=random_service_x,
+            policy_type=policy_type,
+            tactic_runtime=tactic_runtime_config or TacticRuntimeConfig(),
             reward=reward_config or RewardConfig(),
             reset_sampling=reset_sampling_config or ResetSamplingConfig(),
         ),

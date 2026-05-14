@@ -6,7 +6,7 @@ from badminton1d.agents import SafeHitter, StageAgent
 from badminton1d.config import SimulationConfig
 from badminton1d.dynamics import feasible_intercept_indices
 from badminton1d.env import Badminton1DEnv, default_initial_state
-from badminton1d.match import MatchConfig, reset_for_serve, run_match
+from badminton1d.match import MatchConfig, reset_for_serve, run_match, service_receive_position, with_service_court_x_side
 from badminton1d.playback import build_match_trace
 from badminton1d.state import ShotAction
 from badminton1d.trajectory import ballistic_landing_time
@@ -42,18 +42,27 @@ class MatchTests(unittest.TestCase):
             y_rec=state.y0,
         )
 
-    def test_reset_for_serve_uses_default_start_positions_and_serve_height(self) -> None:
+    def test_reset_for_serve_uses_default_service_position_and_serve_height(self) -> None:
         state = reset_for_serve("left", self.config)
+        expected_receiver_x, expected_receiver_y = service_receive_position("right", self.config)
 
-        self.assertAlmostEqual(state.x_left, -self.config.court.half_width / 2.0)
+        self.assertAlmostEqual(state.x_left, -self.config.court.service_x_offset_from_center_line)
         self.assertAlmostEqual(state.y_left, -self.config.court.default_player_start_distance_from_net)
-        self.assertAlmostEqual(state.x_right, self.config.court.half_width / 2.0)
-        self.assertAlmostEqual(state.y_right, self.config.court.default_player_start_distance_from_net)
+        self.assertAlmostEqual(state.x_right, expected_receiver_x)
+        self.assertAlmostEqual(state.y_right, expected_receiver_y)
         self.assertEqual(state.current_hitter, "left")
         self.assertAlmostEqual(state.x0, state.x_left)
         self.assertAlmostEqual(state.y0, state.y_left)
         self.assertAlmostEqual(state.z0, 1.15)
         self.assertFalse(state.rally_done)
+
+    def test_reset_for_serve_moves_receiver_x_half_meter_toward_center(self) -> None:
+        left_server_state = reset_for_serve("left", self.config)
+        right_server_state = reset_for_serve("right", self.config)
+        offset = self.config.court.service_receive_x_offset_toward_center
+
+        self.assertAlmostEqual(left_server_state.x_right, self.config.court.half_width / 2.0 - offset)
+        self.assertAlmostEqual(right_server_state.x_left, -self.config.court.half_width / 2.0 + offset)
 
     def test_default_initial_state_uses_default_start_positions(self) -> None:
         state = default_initial_state(self.config)
@@ -82,6 +91,26 @@ class MatchTests(unittest.TestCase):
         env.reset(reset_for_serve("left", self.config))
 
         action = self._shot_to_landing_target(env.state, landing_x=0.8, landing_y=3.0)
+        feasible = feasible_intercept_indices(env.state, action, self.config)
+        self.assertTrue(feasible)
+        record = env.step(action, intercept_index=feasible[0])
+
+        self.assertFalse(record.next_state.rally_done)
+        self.assertIsNone(record.terminal_reason)
+
+    def test_randomized_service_x_uses_actual_receiver_service_box(self) -> None:
+        env = Badminton1DEnv(config=self.config)
+        state = with_service_court_x_side(
+            reset_for_serve("left", self.config),
+            self.config,
+            server_x_side="right",
+        )
+        env.reset(state)
+
+        self.assertAlmostEqual(env.state.x_left, self.config.court.service_x_offset_from_center_line)
+        self.assertAlmostEqual(env.state.x0, self.config.court.service_x_offset_from_center_line)
+
+        action = self._shot_to_landing_target(env.state, landing_x=-0.8, landing_y=3.0)
         feasible = feasible_intercept_indices(env.state, action, self.config)
         self.assertTrue(feasible)
         record = env.step(action, intercept_index=feasible[0])

@@ -44,8 +44,15 @@ class OpponentPolicy(Protocol):
 
 @dataclass
 class SafeHeuristicOpponent:
-    hitter: SafeHitter = field(default_factory=SafeHitter)
-    receiver: GreedyReceiver = field(default_factory=lambda: GreedyReceiver(mode="earliest"))
+    seed: int | None = None
+    hitter: SafeHitter = field(init=False)
+    receiver: GreedyReceiver = field(init=False)
+
+    def __post_init__(self) -> None:
+        hitter_seed = self.seed
+        receiver_seed = None if self.seed is None else self.seed + 1
+        self.hitter = SafeHitter(seed=hitter_seed, stochastic=True)
+        self.receiver = GreedyReceiver(mode="earliest", seed=receiver_seed, stochastic=True)
 
     def on_episode_start(
         self,
@@ -118,8 +125,15 @@ class RandomValidOpponent:
 
 @dataclass
 class GreedyInterceptOpponent:
-    hitter: SafeHitter = field(default_factory=SafeHitter)
-    receiver: GreedyReceiver = field(default_factory=lambda: GreedyReceiver(mode="highest"))
+    seed: int | None = None
+    hitter: SafeHitter = field(init=False)
+    receiver: GreedyReceiver = field(init=False)
+
+    def __post_init__(self) -> None:
+        hitter_seed = self.seed
+        receiver_seed = None if self.seed is None else self.seed + 1
+        self.hitter = SafeHitter(seed=hitter_seed, stochastic=True)
+        self.receiver = GreedyReceiver(mode="highest", seed=receiver_seed, stochastic=True)
 
     def on_episode_start(
         self,
@@ -154,11 +168,11 @@ class GreedyInterceptOpponent:
 def make_opponent(name: str, seed: int | None = None) -> OpponentPolicy:
     normalized = name.strip().lower()
     if normalized == "safe":
-        return SafeHeuristicOpponent()
+        return SafeHeuristicOpponent(seed=seed)
     if normalized == "random":
         return RandomValidOpponent(seed=seed)
     if normalized == "greedy":
-        return GreedyInterceptOpponent()
+        return GreedyInterceptOpponent(seed=seed)
     raise ValueError(f"Unsupported opponent type: {name}")
 
 
@@ -196,8 +210,15 @@ class RandomDiscretePolicy:
 @dataclass
 class SafeDiscretePolicy:
     action_mapper: DiscreteActionMapper
-    hitter: SafeHitter = field(default_factory=SafeHitter)
-    receiver: GreedyReceiver = field(default_factory=lambda: GreedyReceiver(mode="earliest"))
+    seed: int | None = None
+    hitter: SafeHitter = field(init=False)
+    receiver: GreedyReceiver = field(init=False)
+
+    def __post_init__(self) -> None:
+        hitter_seed = self.seed
+        receiver_seed = None if self.seed is None else self.seed + 1
+        self.hitter = SafeHitter(seed=hitter_seed, stochastic=True)
+        self.receiver = GreedyReceiver(mode="earliest", seed=receiver_seed, stochastic=True)
 
     def choose_action(self, context: DecisionContext) -> int:
         if context.role == "hitter":
@@ -217,8 +238,15 @@ class SafeDiscretePolicy:
 @dataclass
 class GreedyDiscretePolicy:
     action_mapper: DiscreteActionMapper
-    hitter: SafeHitter = field(default_factory=SafeHitter)
-    receiver: GreedyReceiver = field(default_factory=lambda: GreedyReceiver(mode="highest"))
+    seed: int | None = None
+    hitter: SafeHitter = field(init=False)
+    receiver: GreedyReceiver = field(init=False)
+
+    def __post_init__(self) -> None:
+        hitter_seed = self.seed
+        receiver_seed = None if self.seed is None else self.seed + 1
+        self.hitter = SafeHitter(seed=hitter_seed, stochastic=True)
+        self.receiver = GreedyReceiver(mode="highest", seed=receiver_seed, stochastic=True)
 
     def choose_action(self, context: DecisionContext) -> int:
         if context.role == "hitter":
@@ -240,7 +268,7 @@ def make_baseline_policy(name: str, action_mapper: DiscreteActionMapper, seed: i
     if normalized == "random":
         return RandomDiscretePolicy(action_mapper=action_mapper, seed=seed)
     if normalized == "safe":
-        return SafeDiscretePolicy(action_mapper=action_mapper)
+        return SafeDiscretePolicy(action_mapper=action_mapper, seed=seed)
     if normalized == "greedy":
-        return GreedyDiscretePolicy(action_mapper=action_mapper)
+        return GreedyDiscretePolicy(action_mapper=action_mapper, seed=seed)
     raise ValueError(f"Unsupported baseline policy: {name}")
