@@ -34,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speed-weight", type=float, default=ShotPressureWeights.required_speed)
     parser.add_argument("--intercept-weight", type=float, default=ShotPressureWeights.intercept_scarcity)
     parser.add_argument("--height-weight", type=float, default=ShotPressureWeights.low_contact)
+    parser.add_argument("--reaction-miss-weight", type=float, default=ShotPressureWeights.reaction_miss)
     parser.add_argument(
         "--reaction-time",
         type=float,
@@ -97,6 +98,31 @@ def _sim_config_from_mapping(data: dict[str, object]) -> SimulationConfig:
             vy_min_forward=shuttle_speed_min,
             vy_max_forward=shuttle_speed_max,
             intercept_count=intercept_count,
+            reaction_miss_fast_threshold=_float(
+                data,
+                "reaction_miss_fast_threshold",
+                default.action.reaction_miss_fast_threshold,
+            ),
+            reaction_miss_fast_probability=_float(
+                data,
+                "reaction_miss_fast_probability",
+                default.action.reaction_miss_fast_probability,
+            ),
+            reaction_miss_secondary_threshold=_float(
+                data,
+                "reaction_miss_secondary_threshold",
+                default.action.reaction_miss_secondary_threshold,
+            ),
+            reaction_miss_secondary_probability=_float(
+                data,
+                "reaction_miss_secondary_probability",
+                default.action.reaction_miss_secondary_probability,
+            ),
+            reaction_miss_zero_threshold=_float(
+                data,
+                "reaction_miss_zero_threshold",
+                default.action.reaction_miss_zero_threshold,
+            ),
         ),
     )
 
@@ -152,6 +178,7 @@ def _print_summary(summary: dict[str, object], top_rows: list[dict[str, object]]
             f"{row['hitter_side']}->{row['receiver_side']} "
             f"pressure={float(row['pressure']):.3f} "
             f"speed={float(row['required_speed']):.2f}m/s "
+            f"miss={float(row['reaction_miss_score']):.2f} "
             f"feasible={row['feasible_intercept_count']}/{row['candidate_intercept_count']} "
             f"best_z={_format_optional(row['best_contact_height'])}"
         )
@@ -173,6 +200,7 @@ def main() -> None:
         required_speed=args.speed_weight,
         intercept_scarcity=args.intercept_weight,
         low_contact=args.height_weight,
+        reaction_miss=args.reaction_miss_weight,
     )
     rows = evaluate_match_pressure(trace, config, receiver_reaction_time=reaction_time, weights=weights)
     row_dicts = [row.to_dict() for row in rows]
@@ -189,6 +217,7 @@ def main() -> None:
             "required_speed": weights.required_speed,
             "intercept_scarcity": weights.intercept_scarcity,
             "low_contact": weights.low_contact,
+            "reaction_miss": weights.reaction_miss,
         },
         "summary": summary,
         "shots": row_dicts,

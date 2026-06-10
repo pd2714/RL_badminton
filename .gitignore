@@ -2,3 +2,8 @@ __pycache__/
 .pytest_cache/
 *.pyc
 outputs/
+.DS_Store
+screenlog.*
+figure1.pdf
+figure1.png
+6a19f5382c36b7ba5e5cf0b1/

@@ -9,11 +9,18 @@ from gymnasium import spaces
 
 from badminton1d.action_space import DiscreteActionConfig, DiscreteActionMapper
 from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import feasible_intercept_indices, validate_and_clip_shot_action
+from badminton1d.dynamics import (
+    PreparedShot,
+    candidate_intercept_points,
+    prepare_shot,
+    reaction_miss_probability,
+    step_stage,
+)
 from badminton1d.env import Badminton1DEnv
 from badminton1d.match import MatchConfig, MatchScore, reset_for_serve, with_service_court_x_side
+from badminton1d.movement import advance_player_toward
 from badminton1d.obs import ObservationConfig, ObservationEncoder
-from badminton1d.opponents import DecisionContext, OpponentPolicy, make_opponent
+from badminton1d.opponents import DecisionContext, HitterActionCandidate, OpponentPolicy, make_opponent
 from badminton1d.reset_sampling import ResetSampler, ResetSamplingConfig
 from badminton1d.reward_shaping import (
     ActionStreakTracker,
@@ -35,7 +42,7 @@ from badminton1d.reward_shaping import (
 )
 from badminton1d.shot_generators import TacticRuntimeConfig
 from badminton1d.state import ShotAction, Side, StageRecord, ValidatedShotAction
-from badminton1d.utils import opponent_side, player_position
+from badminton1d.utils import opponent_side, player_position, player_velocity
 
 
 def _terminal_rewards(winner: Side | None) -> tuple[float, float]:
@@ -54,6 +61,10 @@ def _sparse_histogram_payload(prefix: str, hist: np.ndarray) -> dict[str, Any]:
         f"{prefix}_indices": indices.astype(int).tolist(),
         f"{prefix}_counts": counts.astype(int).tolist(),
     }
+
+
+RECOVERY_COUNTERFACTUAL_OTHER_SAMPLE_COUNT = 24
+COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES = 2
 
 
 @dataclass(frozen=True)
@@ -93,11 +104,16 @@ class RLEnvConfig:
     max_stages_per_rally: int = 30
     serve_z0: float = 1.15
     include_feasible_mask: bool = True
+    include_reaction_risk_features: bool = True
     include_records_in_info: bool = False
     policy_type: str = "velocity_oriented"
     tactic_runtime: TacticRuntimeConfig = field(default_factory=TacticRuntimeConfig)
     reset_sampling: ResetSamplingConfig = field(default_factory=ResetSamplingConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
+    recovery_counterfactual_other_sample_count: int = RECOVERY_COUNTERFACTUAL_OTHER_SAMPLE_COUNT
+    counterfactual_opponent_response_samples: int = COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES
+    recovery_counterfactual_expected_response_target: bool = True
+    recovery_full_diagnostics_probability: float = 0.0
 
 
 class BadmintonRLEnv(gym.Env[np.ndarray, int]):
@@ -134,6 +150,7 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
                 max_score=self.match_config.target_score,
                 max_stages_per_rally=self.match_config.max_stages_per_rally,
                 include_feasible_mask=self.rl_config.include_feasible_mask,
+                include_reaction_risk_features=self.rl_config.include_reaction_risk_features,
             ),
         )
         self.action_space = self.action_mapper.action_space
@@ -160,6 +177,7 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         self.pending_requested_action: ShotAction | None = None
         self.pending_applied_action: ShotAction | None = None
         self.pending_feasible_indices: list[int] = []
+        self.pending_prepared_shot: PreparedShot | None = None
         self.records: list[StageRecord] = []
         self.last_episode_info: dict[str, Any] | None = None
         self._episode_hitter_hist = np.zeros(self.action_mapper.hitter_action_count, dtype=np.int64)
@@ -235,6 +253,7 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         self.pending_requested_action = None
         self.pending_applied_action = None
         self.pending_feasible_indices = []
+        self.pending_prepared_shot = None
         forced_server: Side | None = None
         opponent_serve_prob = float(self.rl_config.reset_sampling.opponent_serve_start_prob)
         if opponent_serve_prob > 0.0 and float(self.rng.random()) < opponent_serve_prob:
@@ -313,6 +332,7 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
                 self.pending_requested_action = None
                 self.pending_applied_action = None
                 self.pending_feasible_indices = []
+                self.pending_prepared_shot = None
             else:
                 forfeit_record = self._prepare_receiver_turn()
                 if forfeit_record is not None:
@@ -329,9 +349,12 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
                 "action_role": self.role if not terminated and not truncated else None,
             }
         )
-        recovery_after_observation = self._recovery_factorized_after_observation(record)
-        if recovery_after_observation is not None:
-            info["recovery_factorized_after_observation"] = recovery_after_observation
+        info.update(
+            self._recovery_factorized_info(
+                record,
+                terminated=terminated,
+            )
+        )
 
         if terminated or truncated:
             metrics = self._episode_metrics(record, truncated=truncated)
@@ -365,21 +388,18 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
             return record, self._terminal_reward(record.next_state.winner)
         if projected.projected:
             self._episode_invalid_action_count += 1
-        try:
-            validated = validate_and_clip_shot_action(self.base_env.state, projected.shot_action, self.config)
-        except ValueError:
-            self._episode_invalid_action_count += 1
-            record = self._hitter_forfeit_record(self.base_env.state, winner=self.opponent_side, reason="train_no_valid_shot")
-            return record, self._terminal_reward(record.next_state.winner)
-        feasible = feasible_intercept_indices(self.base_env.state, validated.applied, self.config)
+        prepared = projected.prepared_shot
+        validated = prepared.validated_action
+        feasible = list(prepared.feasible_indices)
         chosen_index = self.opponent.choose_intercept_index(
             self.base_env.state,
             validated.applied,
             feasible,
             self.config,
             self.current_server,
+            prepared_shot=prepared,
         )
-        record = self.base_env.step(projected.shot_action, chosen_index)
+        record = self.base_env.step(projected.shot_action, chosen_index, prepared_shot=prepared)
 
         reward = 0.0
         if projected.projected:
@@ -475,7 +495,11 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         if self.pending_requested_action is None:
             raise RuntimeError("Receiver step requested without a pending opponent action.")
 
-        record = self.base_env.step(self.pending_requested_action, intercept_index)
+        record = self.base_env.step(
+            self.pending_requested_action,
+            intercept_index,
+            prepared_shot=self.pending_prepared_shot,
+        )
         if intercept_index not in record.feasible_indices and not already_invalid:
             self._episode_invalid_action_count += 1
             reward -= self.rl_config.reward.invalid_receiver_penalty
@@ -501,6 +525,7 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         self.pending_requested_action = None
         self.pending_applied_action = None
         self.pending_feasible_indices = []
+        self.pending_prepared_shot = None
         return record, reward
 
     def _prepare_receiver_turn(self) -> StageRecord | None:
@@ -510,16 +535,27 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
 
         try:
             requested = self.opponent.choose_hitter_action(state, self.config, self.current_server)
-            validated = validate_and_clip_shot_action(state, requested, self.config)
+            prepared = self._take_opponent_prepared_hitter_shot(requested) or prepare_shot(state, requested, self.config)
         except (RuntimeError, ValueError):
             return self._opponent_forfeit_record(state)
-        feasible = feasible_intercept_indices(state, validated.applied, self.config)
+        validated = prepared.validated_action
+        feasible = list(prepared.feasible_indices)
 
         self.role = "receiver"
         self.pending_requested_action = requested
         self.pending_applied_action = validated.applied
         self.pending_feasible_indices = feasible
+        self.pending_prepared_shot = prepared
         return None
+
+    def _take_opponent_prepared_hitter_shot(self, action: ShotAction) -> PreparedShot | None:
+        take_prepared = getattr(self.opponent, "take_prepared_hitter_shot", None)
+        if not callable(take_prepared):
+            return None
+        prepared = take_prepared()
+        if prepared is None or prepared.validated_action.applied != action:
+            return None
+        return prepared
 
     def _opponent_forfeit_record(self, state: Any) -> StageRecord:
         return self._hitter_forfeit_record(state, winner=self.train_side, reason="opponent_no_valid_shot")
@@ -544,6 +580,7 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
         self.pending_requested_action = None
         self.pending_applied_action = None
         self.pending_feasible_indices = []
+        self.pending_prepared_shot = None
         reward_left, reward_right = _terminal_rewards(next_state.winner)
         return StageRecord(
             stage_index=state.stage_index,
@@ -593,28 +630,357 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
             score_right=self.score.right,
             pending_action=self.pending_applied_action,
             feasible_indices=self.pending_feasible_indices,
+            prepared_shot=self.pending_prepared_shot,
         )
 
-    def _recovery_factorized_after_observation(self, record: StageRecord) -> np.ndarray | None:
-        """Observation for V(s_after_recovery) in recovery-factorized PPO.
+    def _recovery_factorized_info(self, record: StageRecord, *, terminated: bool) -> dict[str, Any]:
+        """Mark train-hitter transitions whose recovery choice should get credit.
 
-        The public next observation may already include a newly sampled opponent
-        pending shot. For the recovery-only advantage, use the clean post-shot
-        state produced by the stage transition, before any next decision context
-        is attached.
+        Non-terminal recovery credit is computed from the real next observation
+        returned by step(), after the opponent shot has been sampled and the
+        receiver feasible mask is known. If that mask is already empty, the next
+        receiver step is forced into a no-feasible-intercept loss, so expose the
+        terminal target immediately for stronger recovery credit.
         """
-        if record.state_before.current_hitter != self.train_side or record.next_state.rally_done:
+        if record.state_before.current_hitter != self.train_side:
+            return {}
+
+        payload: dict[str, Any] = {"recovery_factorized_action": True}
+        if terminated:
+            payload["recovery_factorized_target"] = float(self._terminal_reward(record.next_state.winner))
+        elif self.role == "receiver" and not self.pending_feasible_indices:
+            payload["recovery_factorized_target"] = float(self.rl_config.reward.loss_reward)
+            payload["recovery_factorized_no_feasible_intercept"] = True
+        payload.update(self._recovery_counterfactual_info(record))
+        return payload
+
+    def _recovery_counterfactual_info(self, record: StageRecord) -> dict[str, Any]:
+        """Sample alternate recovery bins after the same shot and opponent reply."""
+        if (
+            record.state_before.current_hitter != self.train_side
+            or record.next_state.rally_done
+            or record.chosen_time is None
+            or self.role != "receiver"
+            or self.pending_applied_action is None
+        ):
+            return {}
+
+        other_sample_count = max(int(self.rl_config.recovery_counterfactual_other_sample_count), 0)
+        full_diagnostics_probability = float(self.rl_config.recovery_full_diagnostics_probability)
+        if other_sample_count <= 0 and full_diagnostics_probability <= 0.0:
+            return {}
+
+        try:
+            x_grid, y_grid = self.action_mapper._recovery_grid_for_shot_action(
+                record.state_before,
+                record.validated_action.applied,
+            )
+        except (AttributeError, ValueError, RuntimeError):
+            return {}
+
+        chosen_index = 0
+        chosen_distance = float("inf")
+        recovery_points: list[tuple[float, float]] = [
+            (float(x_rec), float(y_rec))
+            for x_rec in x_grid
+            for y_rec in y_grid
+        ]
+        for flat_index, (x_rec, y_rec) in enumerate(recovery_points):
+            distance = float(
+                np.hypot(
+                    x_rec - record.validated_action.applied.x_rec,
+                    y_rec - record.validated_action.applied.y_rec,
+                )
+            )
+            if distance < chosen_distance:
+                chosen_distance = distance
+                chosen_index = flat_index
+
+        other_indices = [index for index in range(len(recovery_points)) if index != chosen_index]
+        if len(other_indices) > other_sample_count:
+            other_indices = self.rng.choice(
+                np.asarray(other_indices, dtype=int),
+                size=other_sample_count,
+                replace=False,
+            ).astype(int).tolist()
+        sampled_indices = [chosen_index, *other_indices]
+
+        sampled_observations, sampled_targets = self._recovery_counterfactual_observations(
+            record,
+            recovery_points,
+            sampled_indices,
+        )
+        if sampled_observations.size == 0:
+            return {}
+        sampled_expected_observations = getattr(self, "_last_recovery_expected_observations", None)
+        sampled_expected_miss_probabilities = getattr(self, "_last_recovery_expected_miss_probabilities", None)
+        sampled_expected_no_miss_targets = getattr(self, "_last_recovery_expected_no_miss_targets", None)
+        sampled_response_counts = getattr(self, "_last_recovery_response_counts", None)
+        sampled_response_weights = getattr(self, "_last_recovery_response_weights", None)
+
+        payload: dict[str, Any] = {
+            "recovery_factorized_counterfactual_observations": sampled_observations,
+            "recovery_factorized_counterfactual_targets": sampled_targets,
+            "recovery_factorized_counterfactual_chosen_index": 0,
+            "recovery_factorized_counterfactual_baseline_indices": list(range(1, len(sampled_indices))),
+            "recovery_factorized_counterfactual_sampled_indices": sampled_indices,
+            "recovery_factorized_counterfactual_chosen_flat_index": int(chosen_index),
+            "recovery_factorized_counterfactual_x_bins": int(len(x_grid)),
+            "recovery_factorized_counterfactual_y_bins": int(len(y_grid)),
+            "recovery_factorized_counterfactual_sampled_other_count": int(len(sampled_indices) - 1),
+            "recovery_factorized_counterfactual_expected_response_target": bool(
+                self.rl_config.recovery_counterfactual_expected_response_target
+            ),
+            "recovery_factorized_counterfactual_loss_reward": float(self.rl_config.reward.loss_reward),
+        }
+        if isinstance(sampled_response_counts, np.ndarray) and sampled_response_counts.shape[0] == len(sampled_indices):
+            payload["recovery_factorized_counterfactual_response_counts"] = sampled_response_counts
+        if (
+            isinstance(sampled_response_weights, np.ndarray)
+            and sampled_response_weights.shape[0] == sampled_observations.shape[0]
+        ):
+            payload["recovery_factorized_counterfactual_response_weights"] = sampled_response_weights
+        if (
+            isinstance(sampled_expected_observations, np.ndarray)
+            and sampled_expected_observations.shape == sampled_observations.shape
+        ):
+            payload["recovery_factorized_counterfactual_expected_observations"] = sampled_expected_observations
+            payload["recovery_factorized_counterfactual_expected_miss_probabilities"] = (
+                sampled_expected_miss_probabilities
+            )
+            payload["recovery_factorized_counterfactual_expected_no_miss_targets"] = (
+                sampled_expected_no_miss_targets
+            )
+        if full_diagnostics_probability > 0.0 and float(self.rng.random()) < min(full_diagnostics_probability, 1.0):
+            full_indices = list(range(len(recovery_points)))
+            full_observations, full_targets = self._recovery_counterfactual_observations(
+                record,
+                recovery_points,
+                full_indices,
+            )
+            full_expected_observations = getattr(self, "_last_recovery_expected_observations", None)
+            full_expected_miss_probabilities = getattr(self, "_last_recovery_expected_miss_probabilities", None)
+            full_expected_no_miss_targets = getattr(self, "_last_recovery_expected_no_miss_targets", None)
+            full_response_counts = getattr(self, "_last_recovery_response_counts", None)
+            full_response_weights = getattr(self, "_last_recovery_response_weights", None)
+            if full_observations.size:
+                payload["recovery_factorized_counterfactual_full_observations"] = full_observations
+                payload["recovery_factorized_counterfactual_full_targets"] = full_targets
+                if isinstance(full_response_counts, np.ndarray) and full_response_counts.shape[0] == len(full_indices):
+                    payload["recovery_factorized_counterfactual_full_response_counts"] = full_response_counts
+                if (
+                    isinstance(full_response_weights, np.ndarray)
+                    and full_response_weights.shape[0] == full_observations.shape[0]
+                ):
+                    payload["recovery_factorized_counterfactual_full_response_weights"] = full_response_weights
+                if (
+                    isinstance(full_expected_observations, np.ndarray)
+                    and full_expected_observations.shape == full_observations.shape
+                ):
+                    payload["recovery_factorized_counterfactual_full_expected_observations"] = (
+                        full_expected_observations
+                    )
+                    payload["recovery_factorized_counterfactual_full_expected_miss_probabilities"] = (
+                        full_expected_miss_probabilities
+                    )
+                    payload["recovery_factorized_counterfactual_full_expected_no_miss_targets"] = (
+                        full_expected_no_miss_targets
+                    )
+        return payload
+
+    def _recovery_counterfactual_observations(
+        self,
+        record: StageRecord,
+        recovery_points: list[tuple[float, float]],
+        indices: list[int],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        observations: list[np.ndarray] = []
+        targets: list[float] = []
+        expected_observations: list[np.ndarray] = []
+        expected_miss_probabilities: list[float] = []
+        expected_no_miss_targets: list[float] = []
+        response_counts: list[int] = []
+        response_weights: list[float] = []
+        use_expected_target = bool(self.rl_config.recovery_counterfactual_expected_response_target)
+        self._last_recovery_expected_observations = None
+        self._last_recovery_expected_miss_probabilities = None
+        self._last_recovery_expected_no_miss_targets = None
+        self._last_recovery_response_counts = None
+        self._last_recovery_response_weights = None
+        for point_index in indices:
+            x_rec, y_rec = recovery_points[point_index]
+            cf_state = self._state_after_counterfactual_recovery(
+                record,
+                x_rec=x_rec,
+                y_rec=y_rec,
+            )
+            candidates = self._counterfactual_opponent_response_candidates(cf_state)
+            response_counts.append(len(candidates))
+            total_weight = float(sum(max(float(candidate.probability), 0.0) for candidate in candidates))
+            if total_weight <= 0.0 or not np.isfinite(total_weight):
+                candidate_weights = [1.0 / max(len(candidates), 1) for _ in candidates]
+            else:
+                candidate_weights = [max(float(candidate.probability), 0.0) / total_weight for candidate in candidates]
+
+            for candidate, candidate_weight in zip(candidates, candidate_weights):
+                prepared = candidate.prepared_shot or prepare_shot(cf_state, candidate.action, self.config)
+                applied_action = prepared.validated_action.applied
+                feasible = list(prepared.feasible_indices)
+                receiver_observation = self.observation_encoder.encode(
+                    state=cf_state,
+                    agent_side=self.train_side,
+                    role="receiver",
+                    server_side=self.current_server,
+                    score_left=self.score.left,
+                    score_right=self.score.right,
+                    pending_action=applied_action,
+                    feasible_indices=feasible,
+                    prepared_shot=prepared,
+                )
+                observations.append(receiver_observation)
+                targets.append(float(self.rl_config.reward.loss_reward) if not feasible else float("nan"))
+                response_weights.append(float(candidate_weight))
+                if not use_expected_target:
+                    continue
+
+                expected_observation = receiver_observation
+                miss_probability = 1.0
+                no_miss_target = float("nan")
+                if feasible:
+                    intercept_index = self._lowest_reaction_risk_intercept_index(
+                        cf_state,
+                        applied_action,
+                        feasible,
+                        candidate_times=prepared.candidate_times,
+                    )
+                    if intercept_index is not None:
+                        intercept_time = float(prepared.candidate_times[intercept_index])
+                        miss_probability = reaction_miss_probability(intercept_time, self.config)
+                        no_miss_record = step_stage(
+                            cf_state,
+                            applied_action,
+                            intercept_index,
+                            self.config,
+                            enable_reaction_miss=False,
+                            prepared_shot=prepared,
+                        )
+                        if no_miss_record.next_state.rally_done:
+                            no_miss_target = float(self._terminal_reward(no_miss_record.next_state.winner))
+                        else:
+                            expected_observation = self.observation_encoder.encode(
+                                state=no_miss_record.next_state,
+                                agent_side=self.train_side,
+                                role="hitter",
+                                server_side=self.current_server,
+                                score_left=self.score.left,
+                                score_right=self.score.right,
+                                pending_action=None,
+                                feasible_indices=[],
+                            )
+                expected_observations.append(expected_observation)
+                expected_miss_probabilities.append(float(miss_probability))
+                expected_no_miss_targets.append(float(no_miss_target))
+        if not observations:
+            obs_size = self.observation_encoder.size
+            return np.empty((0, obs_size), dtype=np.float32), np.empty((0,), dtype=np.float32)
+        observation_array = np.asarray(observations, dtype=np.float32)
+        target_array = np.asarray(targets, dtype=np.float32)
+        if use_expected_target and len(expected_observations) == len(observations):
+            self._last_recovery_expected_observations = np.asarray(expected_observations, dtype=np.float32)
+            self._last_recovery_expected_miss_probabilities = np.asarray(
+                expected_miss_probabilities,
+                dtype=np.float32,
+            )
+            self._last_recovery_expected_no_miss_targets = np.asarray(
+                expected_no_miss_targets,
+                dtype=np.float32,
+            )
+        if response_counts:
+            self._last_recovery_response_counts = np.asarray(response_counts, dtype=np.int32)
+            self._last_recovery_response_weights = np.asarray(response_weights, dtype=np.float32)
+        return observation_array, target_array
+
+    def _counterfactual_opponent_response_candidates(self, state: Any) -> list[HitterActionCandidate]:
+        assert self.pending_applied_action is not None
+        count = max(int(self.rl_config.counterfactual_opponent_response_samples), 1)
+        if count > 1:
+            choose_candidates = getattr(self.opponent, "choose_likely_hitter_actions", None)
+            if callable(choose_candidates):
+                try:
+                    candidates = choose_candidates(state, self.config, self.current_server, count=count)
+                except (RuntimeError, ValueError, TypeError):
+                    candidates = []
+                valid_candidates = [
+                    candidate
+                    for candidate in candidates
+                    if isinstance(candidate, HitterActionCandidate) and candidate.action is not None
+                ]
+                if valid_candidates:
+                    return valid_candidates[:count]
+        return [
+            HitterActionCandidate(
+                flat_index=None,
+                action=self.pending_applied_action,
+                probability=1.0,
+                prepared_shot=None,
+            )
+        ]
+
+    def _lowest_reaction_risk_intercept_index(
+        self,
+        state: Any,
+        action: ShotAction,
+        feasible: list[int],
+        *,
+        candidate_times: np.ndarray | None = None,
+    ) -> int | None:
+        if not feasible:
             return None
-        next_role = "hitter" if record.next_state.current_hitter == self.train_side else "receiver"
-        return self.observation_encoder.encode(
-            state=record.next_state,
-            agent_side=self.train_side,
-            role=next_role,
-            server_side=self.current_server,
-            score_left=self.score.left,
-            score_right=self.score.right,
-            pending_action=None,
-            feasible_indices=[],
+        if candidate_times is None:
+            candidate_times, _, _, _ = candidate_intercept_points(state, action, self.config)
+        best_index = None
+        best_key: tuple[float, float] | None = None
+        for index in feasible:
+            if not 0 <= index < len(candidate_times):
+                continue
+            intercept_time = float(candidate_times[index])
+            key = (reaction_miss_probability(intercept_time, self.config), -intercept_time)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_index = int(index)
+        return best_index
+
+    def _state_after_counterfactual_recovery(
+        self,
+        record: StageRecord,
+        *,
+        x_rec: float,
+        y_rec: float,
+    ):
+        motion = advance_player_toward(
+            player_position(record.state_before, self.train_side),
+            player_velocity(record.state_before, self.train_side),
+            (float(x_rec), float(y_rec)),
+            float(record.chosen_time),
+            self.config,
+            stop_when_early=True,
+        )
+        x_pos, y_pos = motion.position
+        v_x, v_y = motion.velocity
+        if self.train_side == "left":
+            return replace(
+                record.next_state,
+                x_left=float(x_pos),
+                y_left=float(y_pos),
+                v_x_left=float(v_x),
+                v_y_left=float(v_y),
+            )
+        return replace(
+            record.next_state,
+            x_right=float(x_pos),
+            y_right=float(y_pos),
+            v_x_right=float(v_x),
+            v_y_right=float(v_y),
         )
 
     def _resolve_server(self, server_value: str | None) -> Side:

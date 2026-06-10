@@ -44,11 +44,11 @@ class CourtConfig:
 
 @dataclass(frozen=True)
 class PlayerConfig:
-    v_max: float = 4.0
-    acceleration: float = 6.5
+    v_max: float = 5.0
+    acceleration: float = 8.0
     deceleration: float | None = None
     movement_model: str = "accelerated"
-    r_reach: float = 1.3
+    r_reach: float = 1.6
     z_min: float = 0.15
     z_max: float = 2.6
     marker_radius: float = 0.22
@@ -76,25 +76,26 @@ class ActionConfig:
     horizontal_drag_coefficient: float | None = 0.2
     vertical_drag_coefficient: float | None = 0.16
     drag_dt: float = 0.01
-    vx_min: float = -6.0
-    vx_max: float = 6.0
+    vx_min: float = -100.0
+    vx_max: float = 100.0
     vy_min_forward: float = 0.1
-    vy_max_forward: float = 80.0
-    vz_min: float = -20.0
-    vz_max: float = 20.0
+    vy_max_forward: float = 100.0
+    vz_min: float = -100.0
+    vz_max: float = 100.0
     net_clearance_margin: float = 0.05
     recovery_x_margin: float = 0.25
     recovery_net_margin: float = 0.3
     recovery_back_margin: float = 0.5
+    conditional_recovery_grid: bool = False
     intercept_count: int = 20
     intercept_time_min: float = 0.02
     intercept_margin_before_landing: float = 0.02
     invalid_receiver_choice_loses: bool = True
     reaction_miss_fast_threshold: float = 0.1
-    reaction_miss_fast_probability: float = 0.9
+    reaction_miss_fast_probability: float = 0.8
     reaction_miss_secondary_threshold: float = 0.5
-    reaction_miss_secondary_probability: float = 0.3
-    reaction_miss_zero_threshold: float = 0.7
+    reaction_miss_secondary_probability: float = 0.0
+    reaction_miss_zero_threshold: float = 0.5
 
     def __post_init__(self) -> None:
         if self.gravity <= 0.0:

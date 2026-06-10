@@ -59,11 +59,31 @@ class RallyDiagnosticsCallback(BaseCallback):
         self.tactic_shot_hist: np.ndarray | None = None
         self.tactic_lookup_valid_sum = 0.0
         self.tactic_lookup_fallback_sum = 0.0
+        self.recovery_counterfactual_count = 0
+        self.recovery_rank_sum = 0.0
+        self.recovery_rank_fraction_sum = 0.0
+        self.recovery_chosen_above_average_sum = 0.0
+        self.recovery_chosen_best_sum = 0.0
+        self.recovery_a_rec_sum = 0.0
+        self.recovery_a_rec_sq_sum = 0.0
+        self.recovery_a_rec_min = float("inf")
+        self.recovery_a_rec_max = float("-inf")
+        self.recovery_training_advantage_sum = 0.0
+        self.recovery_training_advantage_sq_sum = 0.0
+        self.recovery_training_advantage_min = float("inf")
+        self.recovery_training_advantage_max = float("-inf")
+        self.recovery_bin_x_count = 0
+        self.recovery_bin_y_count = 0
+        self.recovery_no_feasible_counts: np.ndarray | None = None
+        self.recovery_bin_counts: np.ndarray | None = None
+        self.recovery_grid_samples: list[dict[str, Any]] = []
+        self.max_recovery_grid_samples = 8
         self.history: list[dict[str, Any]] = []
 
     def _on_step(self) -> bool:
         infos = self.locals.get("infos", [])
         for info in infos:
+            self._accumulate_recovery_diagnostics(info)
             metrics = info.get("badminton_metrics")
             if metrics is None:
                 continue
@@ -132,6 +152,7 @@ class RallyDiagnosticsCallback(BaseCallback):
             "avg_tactic_lookup_valid_count": self.tactic_lookup_valid_sum / self.completed_episodes,
             "avg_tactic_lookup_fallback_count": self.tactic_lookup_fallback_sum / self.completed_episodes,
         }
+        diagnostics.update(self._recovery_diagnostics_payload())
         diagnostics["tactic_zone_frequency"] = self._hist_to_frequency_dict(self.tactic_zone_names, self.tactic_zone_hist)
         diagnostics["tactic_angle_frequency"] = self._hist_to_frequency_dict(self.tactic_angle_names, self.tactic_angle_hist)
         diagnostics["tactic_power_frequency"] = self._hist_to_frequency_dict(self.tactic_power_names, self.tactic_power_hist)
@@ -156,6 +177,21 @@ class RallyDiagnosticsCallback(BaseCallback):
         self.logger.record("badminton/avg_tactic_lookup_fallback_count", diagnostics["avg_tactic_lookup_fallback_count"])
         for name, value in diagnostics["tactic_shot_frequency"].items():
             self.logger.record(f"badminton/tactic_shot_{name}", value)
+        if self.recovery_counterfactual_count > 0:
+            self.logger.record("badminton/recovery_chosen_mean_rank", diagnostics["recovery_chosen_mean_rank"])
+            self.logger.record(
+                "badminton/recovery_chosen_mean_rank_fraction",
+                diagnostics["recovery_chosen_mean_rank_fraction"],
+            )
+            self.logger.record(
+                "badminton/recovery_chosen_above_average_fraction",
+                diagnostics["recovery_chosen_above_average_fraction"],
+            )
+            self.logger.record("badminton/recovery_chosen_best_fraction", diagnostics["recovery_chosen_best_fraction"])
+            self.logger.record("badminton/recovery_a_rec_mean", diagnostics["recovery_a_rec_mean"])
+            self.logger.record("badminton/recovery_a_rec_std", diagnostics["recovery_a_rec_std"])
+            self.logger.record("badminton/recovery_a_rec_min", diagnostics["recovery_a_rec_min"])
+            self.logger.record("badminton/recovery_a_rec_max", diagnostics["recovery_a_rec_max"])
 
         ensure_directory(self.output_dir)
         self.history.append(diagnostics)
@@ -197,6 +233,97 @@ class RallyDiagnosticsCallback(BaseCallback):
             self.tactic_shot_hist += shot_hist
         self.tactic_lookup_valid_sum += float(metrics.get("tactic_lookup_valid_count", 0.0))
         self.tactic_lookup_fallback_sum += float(metrics.get("tactic_lookup_fallback_count", 0.0))
+
+    def _accumulate_recovery_diagnostics(self, info: dict[str, Any]) -> None:
+        recovery = info.get("recovery_factorized_diagnostics")
+        if not isinstance(recovery, dict):
+            return
+        self.recovery_counterfactual_count += 1
+        self.recovery_rank_sum += float(recovery.get("chosen_rank", 0.0))
+        self.recovery_rank_fraction_sum += float(recovery.get("chosen_rank_fraction", 0.0))
+        self.recovery_chosen_above_average_sum += 1.0 if recovery.get("chosen_above_average") else 0.0
+        self.recovery_chosen_best_sum += 1.0 if recovery.get("chosen_best") else 0.0
+
+        a_rec = float(recovery.get("a_rec", 0.0))
+        self.recovery_a_rec_sum += a_rec
+        self.recovery_a_rec_sq_sum += a_rec * a_rec
+        self.recovery_a_rec_min = min(self.recovery_a_rec_min, a_rec)
+        self.recovery_a_rec_max = max(self.recovery_a_rec_max, a_rec)
+
+        training_advantage = float(recovery.get("training_recovery_advantage", a_rec))
+        self.recovery_training_advantage_sum += training_advantage
+        self.recovery_training_advantage_sq_sum += training_advantage * training_advantage
+        self.recovery_training_advantage_min = min(self.recovery_training_advantage_min, training_advantage)
+        self.recovery_training_advantage_max = max(self.recovery_training_advantage_max, training_advantage)
+
+        no_feasible_grid = np.asarray(recovery.get("no_feasible_grid", []), dtype=np.float64)
+        if no_feasible_grid.ndim == 2 and no_feasible_grid.size > 0:
+            flat_no_feasible = no_feasible_grid.reshape(-1)
+            if self.recovery_no_feasible_counts is None or self.recovery_no_feasible_counts.shape != flat_no_feasible.shape:
+                self.recovery_no_feasible_counts = np.zeros_like(flat_no_feasible)
+                self.recovery_bin_counts = np.zeros_like(flat_no_feasible)
+            self.recovery_no_feasible_counts += flat_no_feasible
+            assert self.recovery_bin_counts is not None
+            self.recovery_bin_counts += 1.0
+            self.recovery_bin_x_count = int(no_feasible_grid.shape[0])
+            self.recovery_bin_y_count = int(no_feasible_grid.shape[1])
+
+        if len(self.recovery_grid_samples) < self.max_recovery_grid_samples:
+            sample = {
+                "timesteps": int(self.num_timesteps),
+                "chosen_flat_index": int(recovery.get("chosen_flat_index", -1)),
+                "chosen_x_index": int(recovery.get("chosen_x_index", -1)),
+                "chosen_y_index": int(recovery.get("chosen_y_index", -1)),
+                "chosen_rank": int(recovery.get("chosen_rank", 0)),
+                "chosen_above_average": bool(recovery.get("chosen_above_average", False)),
+                "chosen_best": bool(recovery.get("chosen_best", False)),
+                "a_rec": a_rec,
+                "score_grid": recovery.get("score_grid", []),
+                "policy_probability_grid": recovery.get("policy_probability_grid", []),
+                "no_feasible_grid": recovery.get("no_feasible_grid", []),
+            }
+            self.recovery_grid_samples.append(sample)
+
+    def _recovery_diagnostics_payload(self) -> dict[str, Any]:
+        count = self.recovery_counterfactual_count
+        if count <= 0:
+            return {
+                "recovery_counterfactual_count": 0,
+                "recovery_grid_samples": [],
+            }
+
+        a_rec_mean = self.recovery_a_rec_sum / count
+        a_rec_var = max(self.recovery_a_rec_sq_sum / count - a_rec_mean * a_rec_mean, 0.0)
+        training_mean = self.recovery_training_advantage_sum / count
+        training_var = max(self.recovery_training_advantage_sq_sum / count - training_mean * training_mean, 0.0)
+        payload: dict[str, Any] = {
+            "recovery_counterfactual_count": count,
+            "recovery_chosen_mean_rank": self.recovery_rank_sum / count,
+            "recovery_chosen_mean_rank_fraction": self.recovery_rank_fraction_sum / count,
+            "recovery_chosen_above_average_fraction": self.recovery_chosen_above_average_sum / count,
+            "recovery_chosen_best_fraction": self.recovery_chosen_best_sum / count,
+            "recovery_a_rec_mean": a_rec_mean,
+            "recovery_a_rec_std": float(np.sqrt(a_rec_var)),
+            "recovery_a_rec_min": self.recovery_a_rec_min,
+            "recovery_a_rec_max": self.recovery_a_rec_max,
+            "recovery_training_advantage_mean": training_mean,
+            "recovery_training_advantage_std": float(np.sqrt(training_var)),
+            "recovery_training_advantage_min": self.recovery_training_advantage_min,
+            "recovery_training_advantage_max": self.recovery_training_advantage_max,
+            "recovery_grid_samples": list(self.recovery_grid_samples),
+        }
+        if self.recovery_no_feasible_counts is not None and self.recovery_bin_counts is not None:
+            rates = np.divide(
+                self.recovery_no_feasible_counts,
+                np.maximum(self.recovery_bin_counts, 1.0),
+            )
+            payload["recovery_no_feasible_count_by_bin"] = self.recovery_no_feasible_counts.astype(float).tolist()
+            payload["recovery_bin_count_by_bin"] = self.recovery_bin_counts.astype(float).tolist()
+            payload["recovery_no_feasible_rate_by_bin"] = rates.astype(float).tolist()
+            if self.recovery_bin_x_count > 0 and self.recovery_bin_y_count > 0:
+                shape = (self.recovery_bin_x_count, self.recovery_bin_y_count)
+                payload["recovery_no_feasible_rate_grid"] = rates.reshape(shape).astype(float).tolist()
+        return payload
 
     def _hist_to_frequency_dict(self, names: list[str], hist: np.ndarray | None) -> dict[str, float]:
         if hist is None or hist.size == 0 or not names:

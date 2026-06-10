@@ -23,7 +23,13 @@ from badminton1d.factorized_ppo import RecoveryFactorizedPPO
 from badminton1d.policy import CONTINUOUS_LOG_STD_MAX, CONTINUOUS_LOG_STD_MIN, MaskedBadmintonPolicy
 from badminton1d.reset_sampling import ResetSamplingConfig
 from badminton1d.reward_shaping import AttackRewardConfig, LoopPenaltyConfig, PressureRewardConfig
-from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig, RewardConfig
+from badminton1d.rl_env import (
+    COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES,
+    RECOVERY_COUNTERFACTUAL_OTHER_SAMPLE_COUNT,
+    BadmintonRLEnv,
+    RLEnvConfig,
+    RewardConfig,
+)
 from badminton1d.shot_generators import TacticRuntimeConfig
 from badminton1d.utils import ensure_directory
 
@@ -63,11 +69,22 @@ def load_base_parameters_compatibly(model: PPO, base_model: PPO) -> None:
         ):
             if source_value.shape[1] >= target_value.shape[1]:
                 target_state[key] = source_value[:, : target_value.shape[1]]
-            elif target_value.shape[1] - source_value.shape[1] == 4:
+            elif target_value.shape[1] - source_value.shape[1] == 4 and target_value.shape[1] <= 53:
                 expanded = target_value.clone()
                 expanded.zero_()
                 expanded[:, :29] = source_value[:, :29]
                 expanded[:, 33:] = source_value[:, 29:]
+                target_state[key] = expanded
+            elif target_value.shape[1] - source_value.shape[1] == 4:
+                expanded = target_value.clone()
+                expanded.zero_()
+                expanded[:, : source_value.shape[1]] = source_value
+                target_state[key] = expanded
+            elif target_value.shape[1] - source_value.shape[1] == 8:
+                expanded = target_value.clone()
+                expanded.zero_()
+                expanded[:, :29] = source_value[:, :29]
+                expanded[:, 33:-4] = source_value[:, 29:]
                 target_state[key] = expanded
     model.policy.load_state_dict(target_state, strict=True)
 
@@ -94,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-freq", type=int, default=25000)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--tensorboard-log", type=Path, default=Path("outputs/rl/tensorboard"))
-    parser.add_argument("--ent-coef", type=float, default=0.02)
+    parser.add_argument("--ent-coef", type=float, default=0.002)
     parser.add_argument("--ent-coef-final", type=float, default=0.002)
     parser.add_argument("--random-start-prob", type=float, default=0.0)
     parser.add_argument("--midrally-start-prob", type=float, default=0.0)
@@ -122,7 +139,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attack-min-speed", type=float, default=18.0)
     parser.add_argument("--attack-downward-vz-threshold", type=float, default=0.0)
     parser.add_argument("--mask-mid-rally-hitter-actions", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--use-recovery-factorized-advantage", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use-recovery-factorized-advantage", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--recovery-counterfactual-baseline", choices=("average", "best"), default="average")
+    parser.add_argument(
+        "--recovery-counterfactual-other-sample-count",
+        type=int,
+        default=RECOVERY_COUNTERFACTUAL_OTHER_SAMPLE_COUNT,
+    )
+    parser.add_argument("--recovery-counterfactual-advantage-coef", type=float, default=0.05)
+    parser.add_argument("--recovery-counterfactual-distribution-coef", type=float, default=0.0)
+    parser.add_argument("--recovery-counterfactual-distribution-temperature", type=float, default=0.25)
+    parser.add_argument(
+        "--counterfactual-opponent-response-samples",
+        type=int,
+        default=COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES,
+    )
+    parser.add_argument(
+        "--recovery-counterfactual-expected-response-target",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--recovery-full-diagnostics-probability", type=float, default=0.0)
     parser.add_argument("--eval-deterministic", action="store_true")
     parser.add_argument("--player-speed", type=float, default=SimulationConfig().player.v_max)
     parser.add_argument("--racket-length", type=float, default=SimulationConfig().player.r_reach)
@@ -136,6 +173,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vertical-drag-coefficient", type=float, default=0.16)
     parser.add_argument("--shuttle-speed-min", type=float, default=0.1)
     parser.add_argument("--shuttle-speed-max", type=float, default=SimulationConfig().action.vy_max_forward)
+    parser.add_argument("--conditional-recovery-grid", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--intercept-count", type=int, default=20)
     parser.add_argument("--reaction-miss-fast-threshold", type=float, default=SimulationConfig().action.reaction_miss_fast_threshold)
     parser.add_argument("--reaction-miss-fast-probability", type=float, default=SimulationConfig().action.reaction_miss_fast_probability)
@@ -182,6 +220,7 @@ def build_sim_config(args: argparse.Namespace) -> SimulationConfig:
             vertical_drag_coefficient=vertical_drag,
             vy_min_forward=args.shuttle_speed_min,
             vy_max_forward=args.shuttle_speed_max,
+            conditional_recovery_grid=args.conditional_recovery_grid,
             intercept_count=args.intercept_count,
             reaction_miss_fast_threshold=args.reaction_miss_fast_threshold,
             reaction_miss_fast_probability=args.reaction_miss_fast_probability,
@@ -231,6 +270,10 @@ def build_env_kwargs(args: argparse.Namespace) -> dict[str, object]:
                     downward_vz_threshold=args.attack_downward_vz_threshold,
                 ),
             ),
+            recovery_counterfactual_other_sample_count=args.recovery_counterfactual_other_sample_count,
+            counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
+            recovery_counterfactual_expected_response_target=args.recovery_counterfactual_expected_response_target,
+            recovery_full_diagnostics_probability=args.recovery_full_diagnostics_probability,
         ),
         "discrete_action_config": DiscreteActionConfig(
             phi_bins=args.phi_bins,
@@ -258,11 +301,18 @@ def make_monitored_env(args: argparse.Namespace, output_dir: Path, include_recor
         max_stages_per_rally=rl_config.max_stages_per_rally,
         serve_z0=rl_config.serve_z0,
         include_feasible_mask=rl_config.include_feasible_mask,
+        include_reaction_risk_features=rl_config.include_reaction_risk_features,
         include_records_in_info=include_records,
         policy_type=rl_config.policy_type,
         tactic_runtime=rl_config.tactic_runtime,
         reset_sampling=rl_config.reset_sampling,
         reward=rl_config.reward,
+        recovery_counterfactual_other_sample_count=rl_config.recovery_counterfactual_other_sample_count,
+        counterfactual_opponent_response_samples=rl_config.counterfactual_opponent_response_samples,
+        recovery_counterfactual_expected_response_target=(
+            rl_config.recovery_counterfactual_expected_response_target
+        ),
+        recovery_full_diagnostics_probability=rl_config.recovery_full_diagnostics_probability,
     )
 
     def _factory() -> Monitor:
@@ -281,6 +331,18 @@ def main() -> None:
         raise ValueError("--n-envs must be positive")
     if not 0.0 <= args.mirror_match_fraction <= 1.0:
         raise ValueError("--mirror-match-fraction must be in [0, 1]")
+    if args.recovery_counterfactual_other_sample_count < 0:
+        raise ValueError("--recovery-counterfactual-other-sample-count must be zero or greater")
+    if args.recovery_counterfactual_advantage_coef < 0.0:
+        raise ValueError("--recovery-counterfactual-advantage-coef must be zero or greater")
+    if args.recovery_counterfactual_distribution_coef < 0.0:
+        raise ValueError("--recovery-counterfactual-distribution-coef must be zero or greater")
+    if args.recovery_counterfactual_distribution_temperature <= 0.0:
+        raise ValueError("--recovery-counterfactual-distribution-temperature must be positive")
+    if args.counterfactual_opponent_response_samples < 1:
+        raise ValueError("--counterfactual-opponent-response-samples must be positive")
+    if not 0.0 <= args.recovery_full_diagnostics_probability <= 1.0:
+        raise ValueError("--recovery-full-diagnostics-probability must be in [0, 1]")
 
     run_dir = args.output_dir
     checkpoint_dir = run_dir / "checkpoints"
@@ -325,17 +387,28 @@ def main() -> None:
         max_stages_per_rally=safe_eval_rl_config.max_stages_per_rally,
         serve_z0=safe_eval_rl_config.serve_z0,
         include_feasible_mask=safe_eval_rl_config.include_feasible_mask,
+        include_reaction_risk_features=safe_eval_rl_config.include_reaction_risk_features,
         include_records_in_info=False,
         policy_type=safe_eval_rl_config.policy_type,
         tactic_runtime=safe_eval_rl_config.tactic_runtime,
         reset_sampling=safe_eval_rl_config.reset_sampling,
         reward=safe_eval_rl_config.reward,
+        recovery_counterfactual_other_sample_count=0,
+        counterfactual_opponent_response_samples=safe_eval_rl_config.counterfactual_opponent_response_samples,
+        recovery_counterfactual_expected_response_target=False,
+        recovery_full_diagnostics_probability=0.0,
     )
     safe_eval_env = BadmintonRLEnv(**safe_eval_kwargs, seed=args.seed + 10_000)
 
     ppo_class = RecoveryFactorizedPPO if args.use_recovery_factorized_advantage else PPO
     ppo_extra_kwargs = (
-        {"use_recovery_factorized_advantage": True}
+        {
+            "use_recovery_factorized_advantage": True,
+            "recovery_counterfactual_baseline": args.recovery_counterfactual_baseline,
+            "recovery_counterfactual_advantage_coef": args.recovery_counterfactual_advantage_coef,
+            "recovery_counterfactual_distribution_coef": args.recovery_counterfactual_distribution_coef,
+            "recovery_counterfactual_distribution_temperature": args.recovery_counterfactual_distribution_temperature,
+        }
         if args.use_recovery_factorized_advantage
         else {}
     )
@@ -450,6 +523,14 @@ def main() -> None:
         "attack_downward_vz_threshold": args.attack_downward_vz_threshold,
         "mask_mid_rally_hitter_actions": args.mask_mid_rally_hitter_actions,
         "use_recovery_factorized_advantage": args.use_recovery_factorized_advantage,
+        "recovery_counterfactual_baseline": args.recovery_counterfactual_baseline,
+        "recovery_counterfactual_other_sample_count": args.recovery_counterfactual_other_sample_count,
+        "recovery_counterfactual_advantage_coef": args.recovery_counterfactual_advantage_coef,
+        "recovery_counterfactual_distribution_coef": args.recovery_counterfactual_distribution_coef,
+        "recovery_counterfactual_distribution_temperature": args.recovery_counterfactual_distribution_temperature,
+        "counterfactual_opponent_response_samples": args.counterfactual_opponent_response_samples,
+        "recovery_counterfactual_expected_response_target": args.recovery_counterfactual_expected_response_target,
+        "recovery_full_diagnostics_probability": args.recovery_full_diagnostics_probability,
         "eval_deterministic": args.eval_deterministic,
         "player_speed": args.player_speed,
         "racket_length": args.racket_length,
@@ -463,12 +544,14 @@ def main() -> None:
         "vertical_drag_coefficient": args.vertical_drag_coefficient,
         "shuttle_speed_min": args.shuttle_speed_min,
         "shuttle_speed_max": args.shuttle_speed_max,
+        "conditional_recovery_grid": args.conditional_recovery_grid,
         "intercept_count": args.intercept_count,
         "reaction_miss_fast_threshold": args.reaction_miss_fast_threshold,
         "reaction_miss_fast_probability": args.reaction_miss_fast_probability,
         "reaction_miss_secondary_threshold": args.reaction_miss_secondary_threshold,
         "reaction_miss_secondary_probability": args.reaction_miss_secondary_probability,
         "reaction_miss_zero_threshold": args.reaction_miss_zero_threshold,
+        "include_reaction_risk_features": True,
         "final_model_path": str(final_model_path),
         "best_model_path": str(best_dir / "best_model.zip"),
         "tensorboard_log": str(args.tensorboard_log),

@@ -36,7 +36,13 @@ from badminton1d.reward_shaping import (
     ReturnDepthRewardConfig,
 )
 from badminton1d.opponents import make_opponent
-from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig, RewardConfig
+from badminton1d.rl_env import (
+    COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES,
+    RECOVERY_COUNTERFACTUAL_OTHER_SAMPLE_COUNT,
+    BadmintonRLEnv,
+    RLEnvConfig,
+    RewardConfig,
+)
 from badminton1d.shot_generators import TacticRuntimeConfig
 from badminton1d.selfplay import (
     CheckpointPool,
@@ -48,6 +54,7 @@ from badminton1d.selfplay import (
     SelfPlayEvalCallback,
     SelfPlayProgressVideoCallback,
     build_selfplay_env,
+    replace_with_existing_file,
 )
 from badminton1d.utils import ensure_directory
 
@@ -83,11 +90,24 @@ def load_base_policy_state_compatibly(model: PPO, source_state: dict[str, object
             if source_value.shape[1] >= target_value.shape[1]:
                 target_state[key] = source_value[:, : target_value.shape[1]]
                 prefix_copied += 1
-            elif target_value.shape[1] - source_value.shape[1] == 4:
+            elif target_value.shape[1] - source_value.shape[1] == 4 and target_value.shape[1] <= 53:
                 expanded = target_value.clone()
                 expanded.zero_()
                 expanded[:, :29] = source_value[:, :29]
                 expanded[:, 33:] = source_value[:, 29:]
+                target_state[key] = expanded
+                prefix_copied += 1
+            elif target_value.shape[1] - source_value.shape[1] == 4:
+                expanded = target_value.clone()
+                expanded.zero_()
+                expanded[:, : source_value.shape[1]] = source_value
+                target_state[key] = expanded
+                prefix_copied += 1
+            elif target_value.shape[1] - source_value.shape[1] == 8:
+                expanded = target_value.clone()
+                expanded.zero_()
+                expanded[:, :29] = source_value[:, :29]
+                expanded[:, 33:-4] = source_value[:, 29:]
                 target_state[key] = expanded
                 prefix_copied += 1
 
@@ -127,11 +147,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--n-steps", type=int, default=256)
     parser.add_argument("--n-epochs", type=int, default=10)
-    parser.add_argument("--ent-coef", type=float, default=0.02)
+    parser.add_argument("--ent-coef", type=float, default=0.002)
     parser.add_argument("--ent-coef-final", type=float, default=0.002)
     parser.add_argument("--n-envs", type=int, default=8)
     parser.add_argument("--vec-env", choices=("dummy", "subproc"), default="subproc")
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--save-interval", type=int, default=2000)
     parser.add_argument("--pool-size", type=int, default=6)
     parser.add_argument("--opponent-sampling-mode", choices=("uniform", "random", "recency", "newest"), default="recency")
@@ -180,12 +201,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--defensive-lift-min-depth-ratio", type=float, default=0.7)
     parser.add_argument("--intercept-ratio-min-intended-flight-time", type=float, default=0.8)
     parser.add_argument("--mask-mid-rally-hitter-actions", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--use-recovery-factorized-advantage", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--use-recovery-factorized-advantage", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--recovery-counterfactual-baseline", choices=("average", "best"), default="average")
+    parser.add_argument(
+        "--recovery-counterfactual-other-sample-count",
+        type=int,
+        default=RECOVERY_COUNTERFACTUAL_OTHER_SAMPLE_COUNT,
+    )
+    parser.add_argument("--recovery-counterfactual-advantage-coef", type=float, default=0.05)
+    parser.add_argument("--recovery-counterfactual-distribution-coef", type=float, default=0.0)
+    parser.add_argument("--recovery-counterfactual-distribution-temperature", type=float, default=0.25)
+    parser.add_argument(
+        "--counterfactual-opponent-response-samples",
+        type=int,
+        default=COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES,
+    )
+    parser.add_argument(
+        "--recovery-counterfactual-expected-response-target",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument("--recovery-full-diagnostics-probability", type=float, default=0.0)
     parser.add_argument("--opponent-travel-reward-weight", type=float, default=0.0)
     parser.add_argument("--return-depth-reward-weight", type=float, default=0.0)
     parser.add_argument("--net-proximity-reward-weight", type=float, default=0.0)
     parser.add_argument("--net-proximity-threshold", type=float, default=0.5)
-    parser.add_argument("--eval-freq", type=int, default=5000)
+    parser.add_argument("--eval-freq", type=int, default=100000)
     parser.add_argument("--eval-episodes", type=int, default=12)
     parser.add_argument("--eval-deterministic", action="store_true")
     parser.add_argument("--anchor-eval-interval", type=int, default=0)
@@ -225,6 +266,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recovery-x-margin", type=float, default=None)
     parser.add_argument("--recovery-net-margin", type=float, default=None)
     parser.add_argument("--recovery-back-margin", type=float, default=None)
+    parser.add_argument("--conditional-recovery-grid", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--intercept-count", type=int, default=20)
     parser.add_argument("--reaction-miss-fast-threshold", type=float, default=SimulationConfig().action.reaction_miss_fast_threshold)
     parser.add_argument("--reaction-miss-fast-probability", type=float, default=SimulationConfig().action.reaction_miss_fast_probability)
@@ -285,6 +327,7 @@ def build_sim_config(args: argparse.Namespace) -> SimulationConfig:
             recovery_back_margin=(
                 action_defaults.recovery_back_margin if recovery_back_margin is None else recovery_back_margin
             ),
+            conditional_recovery_grid=args.conditional_recovery_grid,
             intercept_count=args.intercept_count,
             reaction_miss_fast_threshold=args.reaction_miss_fast_threshold,
             reaction_miss_fast_probability=args.reaction_miss_fast_probability,
@@ -350,6 +393,10 @@ def create_compatible_base_checkpoint(
             tactic_runtime=tactic_runtime_config,
             reward=reward_config,
             reset_sampling=reset_sampling_config,
+            recovery_counterfactual_other_sample_count=args.recovery_counterfactual_other_sample_count,
+            counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
+            recovery_counterfactual_expected_response_target=args.recovery_counterfactual_expected_response_target,
+            recovery_full_diagnostics_probability=args.recovery_full_diagnostics_probability,
         ),
         discrete_action_config=discrete_action_config,
         opponent=make_opponent("safe", seed=args.seed + 700_000),
@@ -400,6 +447,8 @@ def main() -> None:
         raise ValueError("--anchor-eval-interval must be zero or greater")
     if args.n_envs <= 0:
         raise ValueError("--n-envs must be positive")
+    if args.log_interval <= 0:
+        raise ValueError("--log-interval must be positive")
     if args.n_epochs <= 0:
         raise ValueError("--n-epochs must be positive")
     if not 0.0 <= args.mirror_match_fraction <= 1.0:
@@ -424,6 +473,18 @@ def main() -> None:
         raise ValueError("--defensive-lift-min-depth-ratio must be in [0, 1]")
     if args.intercept_ratio_min_intended_flight_time <= 0.0:
         raise ValueError("--intercept-ratio-min-intended-flight-time must be positive")
+    if args.recovery_counterfactual_other_sample_count < 0:
+        raise ValueError("--recovery-counterfactual-other-sample-count must be zero or greater")
+    if args.recovery_counterfactual_advantage_coef < 0.0:
+        raise ValueError("--recovery-counterfactual-advantage-coef must be zero or greater")
+    if args.recovery_counterfactual_distribution_coef < 0.0:
+        raise ValueError("--recovery-counterfactual-distribution-coef must be zero or greater")
+    if args.recovery_counterfactual_distribution_temperature <= 0.0:
+        raise ValueError("--recovery-counterfactual-distribution-temperature must be positive")
+    if args.counterfactual_opponent_response_samples < 1:
+        raise ValueError("--counterfactual-opponent-response-samples must be positive")
+    if not 0.0 <= args.recovery_full_diagnostics_probability <= 1.0:
+        raise ValueError("--recovery-full-diagnostics-probability must be in [0, 1]")
 
     run_dir = args.output_dir
     checkpoint_dir = run_dir / "checkpoint_pool"
@@ -592,6 +653,10 @@ def main() -> None:
             discrete_action_config=discrete_action_config,
             opponent=make_training_opponent(include_records=include_records),
             include_records_in_info=include_records,
+            recovery_counterfactual_other_sample_count=args.recovery_counterfactual_other_sample_count,
+            counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
+            recovery_counterfactual_expected_response_target=args.recovery_counterfactual_expected_response_target,
+            recovery_full_diagnostics_probability=args.recovery_full_diagnostics_probability,
         )
 
     def monitored_factory() -> Monitor:
@@ -650,6 +715,10 @@ def main() -> None:
             )
         ),
         include_records_in_info=True,
+        recovery_counterfactual_other_sample_count=0,
+        counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
+        recovery_counterfactual_expected_response_target=False,
+        recovery_full_diagnostics_probability=0.0,
     )
     progress_mirror_env = build_selfplay_env(
         train_side=args.train_side,
@@ -674,11 +743,21 @@ def main() -> None:
             label_name="mirror_self",
         ),
         include_records_in_info=True,
+        recovery_counterfactual_other_sample_count=0,
+        counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
+        recovery_counterfactual_expected_response_target=False,
+        recovery_full_diagnostics_probability=0.0,
     )
 
     ppo_class = RecoveryFactorizedPPO if args.use_recovery_factorized_advantage else PPO
     ppo_extra_kwargs = (
-        {"use_recovery_factorized_advantage": True}
+        {
+            "use_recovery_factorized_advantage": True,
+            "recovery_counterfactual_baseline": args.recovery_counterfactual_baseline,
+            "recovery_counterfactual_advantage_coef": args.recovery_counterfactual_advantage_coef,
+            "recovery_counterfactual_distribution_coef": args.recovery_counterfactual_distribution_coef,
+            "recovery_counterfactual_distribution_temperature": args.recovery_counterfactual_distribution_temperature,
+        }
         if args.use_recovery_factorized_advantage
         else {}
     )
@@ -795,9 +874,14 @@ def main() -> None:
             )
     callbacks = CallbackList(callbacks_list)
 
-    model.learn(total_timesteps=args.selfplay_total_timesteps, callback=callbacks, progress_bar=False)
+    model.learn(
+        total_timesteps=args.selfplay_total_timesteps,
+        callback=callbacks,
+        log_interval=args.log_interval,
+        progress_bar=False,
+    )
     model.save(final_model_path)
-    model.save(latest_model_path)
+    replace_with_existing_file(final_model_path, latest_model_path)
 
     train_pool.refresh()
     summary = {
@@ -819,6 +903,7 @@ def main() -> None:
         "n_envs": args.n_envs,
         "vec_env": args.vec_env,
         "seed": args.seed,
+        "log_interval": args.log_interval,
         "ent_coef": args.ent_coef,
         "ent_coef_final": args.ent_coef_final,
         "save_interval": args.save_interval,
@@ -888,11 +973,20 @@ def main() -> None:
         "intercept_ratio_min_intended_flight_time": args.intercept_ratio_min_intended_flight_time,
         "mask_mid_rally_hitter_actions": args.mask_mid_rally_hitter_actions,
         "use_recovery_factorized_advantage": args.use_recovery_factorized_advantage,
+        "recovery_counterfactual_baseline": args.recovery_counterfactual_baseline,
+        "recovery_counterfactual_other_sample_count": args.recovery_counterfactual_other_sample_count,
+        "recovery_counterfactual_advantage_coef": args.recovery_counterfactual_advantage_coef,
+        "recovery_counterfactual_distribution_coef": args.recovery_counterfactual_distribution_coef,
+        "recovery_counterfactual_distribution_temperature": args.recovery_counterfactual_distribution_temperature,
+        "counterfactual_opponent_response_samples": args.counterfactual_opponent_response_samples,
+        "recovery_counterfactual_expected_response_target": args.recovery_counterfactual_expected_response_target,
+        "recovery_full_diagnostics_probability": args.recovery_full_diagnostics_probability,
         "opponent_travel_reward_weight": args.opponent_travel_reward_weight,
         "return_depth_reward_weight": args.return_depth_reward_weight,
         "net_proximity_reward_weight": args.net_proximity_reward_weight,
         "net_proximity_threshold": args.net_proximity_threshold,
         "eval_episodes": args.eval_episodes,
+        "eval_freq": args.eval_freq,
         "eval_deterministic": args.eval_deterministic,
         "anchor_eval_interval": args.anchor_eval_interval,
         "anchor_checkpoint_dir": str(anchor_checkpoint_dir),
@@ -930,12 +1024,14 @@ def main() -> None:
         "recovery_x_margin": sim_config.action.recovery_x_margin,
         "recovery_net_margin": sim_config.action.recovery_net_margin,
         "recovery_back_margin": sim_config.action.recovery_back_margin,
+        "conditional_recovery_grid": sim_config.action.conditional_recovery_grid,
         "intercept_count": args.intercept_count,
         "reaction_miss_fast_threshold": args.reaction_miss_fast_threshold,
         "reaction_miss_fast_probability": args.reaction_miss_fast_probability,
         "reaction_miss_secondary_threshold": args.reaction_miss_secondary_threshold,
         "reaction_miss_secondary_probability": args.reaction_miss_secondary_probability,
         "reaction_miss_zero_threshold": args.reaction_miss_zero_threshold,
+        "include_reaction_risk_features": True,
         "phi_bins": args.phi_bins,
         "theta_bins": args.theta_bins,
         "speed_bins": args.speed_bins,

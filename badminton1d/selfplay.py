@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -8,17 +9,32 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
 from badminton1d.action_space import DiscreteActionConfig, DiscreteActionMapper
 from badminton1d.config import SimulationConfig
-from badminton1d.evaluation import ModelSelector, choose_model_action, evaluate_selector, rollout_episode, summarize_episodes
+from badminton1d.dynamics import PreparedShot
+from badminton1d.evaluation import (
+    ModelSelector,
+    adapt_observation_to_model,
+    choose_model_action,
+    evaluate_selector,
+    rollout_episode,
+    summarize_episodes,
+)
 from badminton1d.obs import ObservationConfig, ObservationEncoder
-from badminton1d.opponents import DecisionContext, OpponentPolicy, make_opponent
+from badminton1d.opponents import DecisionContext, HitterActionCandidate, OpponentPolicy, make_opponent
 from badminton1d.playback import build_rally_trace, rally_trace_to_dict
 from badminton1d.reset_sampling import ResetSamplingConfig
-from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig, RewardConfig
+from badminton1d.rl_env import (
+    COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES,
+    RECOVERY_COUNTERFACTUAL_OTHER_SAMPLE_COUNT,
+    BadmintonRLEnv,
+    RLEnvConfig,
+    RewardConfig,
+)
 from badminton1d.shot_generators import TacticRuntimeConfig
 from badminton1d.state import ShotAction, Side, StageState
 from badminton1d.utils import ensure_directory
@@ -27,11 +43,65 @@ from badminton1d.video import TrainingProgressSample, export_rally_video, export
 _STEP_PATTERN = re.compile(r"(\d+)")
 
 
+def replace_with_existing_file(source_path: Path, target_path: Path) -> None:
+    ensure_directory(target_path.parent)
+    tmp_path = target_path.with_name(f".{target_path.name}.tmp")
+    try:
+        tmp_path.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        os.link(source_path, tmp_path)
+    except OSError:
+        shutil.copy2(source_path, tmp_path)
+    tmp_path.replace(target_path)
+
+
 def _model_action_value(action: Any) -> Any:
     arr = np.asarray(action)
     if arr.shape == ():
         return int(arr)
     return arr.astype(np.float32, copy=False)
+
+
+def _top_hitter_action_indices(
+    model: PPO,
+    observation: np.ndarray,
+    *,
+    hitter_action_count: int,
+    count: int,
+    batch_size: int = 2048,
+) -> list[tuple[int, float]]:
+    if hitter_action_count <= 0 or count <= 0:
+        return []
+    observation = adapt_observation_to_model(model, observation)
+    actions = np.arange(int(hitter_action_count), dtype=np.int64)
+    log_probs: list[np.ndarray] = []
+    with torch.no_grad():
+        for start in range(0, actions.size, batch_size):
+            batch_actions = actions[start : start + batch_size]
+            batch_obs = np.repeat(observation.reshape(1, -1), batch_actions.size, axis=0).astype(np.float32)
+            obs_tensor, _ = model.policy.obs_to_tensor(batch_obs)
+            action_tensor = torch.as_tensor(batch_actions, dtype=torch.long, device=model.device)
+            _, batch_log_prob, _ = model.policy.evaluate_actions(obs_tensor, action_tensor)
+            log_probs.append(batch_log_prob.detach().cpu().numpy().reshape(-1))
+    log_prob_array = np.concatenate(log_probs).astype(float, copy=False)
+    finite = np.isfinite(log_prob_array)
+    if not np.any(finite):
+        predicted, _ = model.predict(observation, deterministic=True)
+        return [(int(_model_action_value(predicted)), 1.0)]
+    finite_indices = np.flatnonzero(finite)
+    finite_scores = log_prob_array[finite_indices]
+    order = np.argsort(finite_scores)[::-1][: max(int(count), 1)]
+    selected = finite_indices[order]
+    selected_scores = finite_scores[order]
+    weights = np.exp(selected_scores - float(np.max(selected_scores)))
+    total = float(np.sum(weights))
+    if total <= 0.0 or not np.isfinite(total):
+        probabilities = np.full(weights.shape[0], 1.0 / max(weights.shape[0], 1), dtype=float)
+    else:
+        probabilities = weights / total
+    return [(int(index), float(probability)) for index, probability in zip(selected, probabilities)]
 
 
 def _checkpoint_sort_key(path: Path) -> tuple[int, float, str]:
@@ -193,6 +263,7 @@ class FrozenCheckpointOpponent(OpponentPolicy):
     current_checkpoint_path: Path | None = field(default=None, init=False)
     current_model: PPO | None = field(default=None, init=False)
     current_side: Side = field(default="right", init=False)
+    _prepared_hitter_shot: PreparedShot | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.action_mapper = DiscreteActionMapper(
@@ -212,6 +283,7 @@ class FrozenCheckpointOpponent(OpponentPolicy):
         config: SimulationConfig,
     ) -> None:
         self.current_side = opponent_side
+        self._prepared_hitter_shot = None
         self.current_checkpoint_path = self.pool.sample_path()
         self.current_model = self.pool.load_model(self.current_checkpoint_path)
 
@@ -232,7 +304,51 @@ class FrozenCheckpointOpponent(OpponentPolicy):
             feasible_indices=[],
         )
         decoded = self.action_mapper.decode_hitter_for_agent(action, state, self.current_side).shot_action
-        return self.action_mapper.project_hitter_action(state, decoded).shot_action
+        projected = self.action_mapper.project_hitter_action(state, decoded)
+        self._prepared_hitter_shot = projected.prepared_shot
+        return projected.shot_action
+
+    def choose_likely_hitter_actions(
+        self,
+        state: StageState,
+        config: SimulationConfig,
+        server_side: Side,
+        *,
+        count: int,
+    ) -> list[HitterActionCandidate]:
+        if self.current_model is None:
+            raise RuntimeError("Frozen checkpoint opponent has no active model for the current episode.")
+        observation = self.observation_encoder.encode(
+            state=state,
+            agent_side=self.current_side,
+            role="hitter",
+            server_side=server_side,
+            pending_action=None,
+            feasible_indices=[],
+        )
+        candidates: list[HitterActionCandidate] = []
+        for flat_index, probability in _top_hitter_action_indices(
+            self.current_model,
+            observation,
+            hitter_action_count=self.action_mapper.hitter_action_count,
+            count=count,
+        ):
+            decoded = self.action_mapper.decode_hitter_for_agent(flat_index, state, self.current_side).shot_action
+            projected = self.action_mapper.project_hitter_action(state, decoded)
+            candidates.append(
+                HitterActionCandidate(
+                    flat_index=int(flat_index),
+                    action=projected.shot_action,
+                    probability=float(probability),
+                    prepared_shot=projected.prepared_shot,
+                )
+            )
+        return candidates
+
+    def take_prepared_hitter_shot(self) -> PreparedShot | None:
+        prepared = self._prepared_hitter_shot
+        self._prepared_hitter_shot = None
+        return prepared
 
     def choose_intercept_index(
         self,
@@ -241,6 +357,8 @@ class FrozenCheckpointOpponent(OpponentPolicy):
         feasible_indices: list[int],
         config: SimulationConfig,
         server_side: Side,
+        *,
+        prepared_shot: PreparedShot | None = None,
     ) -> int | None:
         observation = self.observation_encoder.encode(
             state=state,
@@ -249,6 +367,7 @@ class FrozenCheckpointOpponent(OpponentPolicy):
             server_side=server_side,
             pending_action=action,
             feasible_indices=feasible_indices,
+            prepared_shot=prepared_shot,
         )
         if self.current_model is None:
             raise RuntimeError("Frozen checkpoint opponent has no active model for the current episode.")
@@ -284,6 +403,7 @@ class FrozenCheckpointOpponent(OpponentPolicy):
             pending_action=pending_action,
             feasible_indices=feasible_indices,
         )
+        observation = adapt_observation_to_model(self.current_model, observation)
         action, _ = self.current_model.predict(observation, deterministic=self._deterministic_for_role(role))
         return _model_action_value(action)
 
@@ -308,6 +428,7 @@ class FixedCheckpointOpponent(FrozenCheckpointOpponent):
         config: SimulationConfig,
     ) -> None:
         self.current_side = opponent_side
+        self._prepared_hitter_shot = None
         if self.checkpoint_path is None:
             raise RuntimeError("FixedCheckpointOpponent requires checkpoint_path.")
         self.current_checkpoint_path = self.checkpoint_path.resolve()
@@ -329,6 +450,7 @@ class LiveModelOpponent(OpponentPolicy):
     action_mapper: DiscreteActionMapper = field(init=False)
     observation_encoder: ObservationEncoder = field(init=False)
     current_side: Side = field(default="right", init=False)
+    _prepared_hitter_shot: PreparedShot | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.action_mapper = DiscreteActionMapper(
@@ -351,6 +473,7 @@ class LiveModelOpponent(OpponentPolicy):
         config: SimulationConfig,
     ) -> None:
         self.current_side = opponent_side
+        self._prepared_hitter_shot = None
 
     def refresh(self) -> None:
         return None
@@ -367,7 +490,51 @@ class LiveModelOpponent(OpponentPolicy):
             feasible_indices=[],
         )
         decoded = self.action_mapper.decode_hitter_for_agent(action, state, self.current_side).shot_action
-        return self.action_mapper.project_hitter_action(state, decoded).shot_action
+        projected = self.action_mapper.project_hitter_action(state, decoded)
+        self._prepared_hitter_shot = projected.prepared_shot
+        return projected.shot_action
+
+    def choose_likely_hitter_actions(
+        self,
+        state: StageState,
+        config: SimulationConfig,
+        server_side: Side,
+        *,
+        count: int,
+    ) -> list[HitterActionCandidate]:
+        if self.model is None:
+            raise RuntimeError("LiveModelOpponent has no model bound.")
+        observation = self.observation_encoder.encode(
+            state=state,
+            agent_side=self.current_side,
+            role="hitter",
+            server_side=server_side,
+            pending_action=None,
+            feasible_indices=[],
+        )
+        candidates: list[HitterActionCandidate] = []
+        for flat_index, probability in _top_hitter_action_indices(
+            self.model,
+            observation,
+            hitter_action_count=self.action_mapper.hitter_action_count,
+            count=count,
+        ):
+            decoded = self.action_mapper.decode_hitter_for_agent(flat_index, state, self.current_side).shot_action
+            projected = self.action_mapper.project_hitter_action(state, decoded)
+            candidates.append(
+                HitterActionCandidate(
+                    flat_index=int(flat_index),
+                    action=projected.shot_action,
+                    probability=float(probability),
+                    prepared_shot=projected.prepared_shot,
+                )
+            )
+        return candidates
+
+    def take_prepared_hitter_shot(self) -> PreparedShot | None:
+        prepared = self._prepared_hitter_shot
+        self._prepared_hitter_shot = None
+        return prepared
 
     def choose_intercept_index(
         self,
@@ -376,6 +543,8 @@ class LiveModelOpponent(OpponentPolicy):
         feasible_indices: list[int],
         config: SimulationConfig,
         server_side: Side,
+        *,
+        prepared_shot: PreparedShot | None = None,
     ) -> int | None:
         observation = self.observation_encoder.encode(
             state=state,
@@ -384,6 +553,7 @@ class LiveModelOpponent(OpponentPolicy):
             server_side=server_side,
             pending_action=action,
             feasible_indices=feasible_indices,
+            prepared_shot=prepared_shot,
         )
         if self.model is None:
             raise RuntimeError("LiveModelOpponent has no model bound.")
@@ -419,6 +589,7 @@ class LiveModelOpponent(OpponentPolicy):
             pending_action=pending_action,
             feasible_indices=feasible_indices,
         )
+        observation = adapt_observation_to_model(self.model, observation)
         action, _ = self.model.predict(observation, deterministic=self._deterministic_for_role(role))
         return _model_action_value(action)
 
@@ -452,6 +623,7 @@ class MixedCheckpointOpponent(OpponentPolicy):
     current_side: Side = field(default="right", init=False)
     active_source: str = field(default="checkpoint", init=False)
     active_bucket: str = field(default="recent", init=False)
+    _prepared_hitter_shot: PreparedShot | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.action_mapper = DiscreteActionMapper(
@@ -473,6 +645,7 @@ class MixedCheckpointOpponent(OpponentPolicy):
         self.current_side = opponent_side
         self.current_checkpoint_path = None
         self.current_model = None
+        self._prepared_hitter_shot = None
         if float(self.checkpoint_pool.rng.random()) < self.heuristic_opponent_prob:
             self.active_source = "heuristic"
             self.active_bucket = "heuristic"
@@ -502,6 +675,7 @@ class MixedCheckpointOpponent(OpponentPolicy):
 
     def choose_hitter_action(self, state: StageState, config: SimulationConfig, server_side: Side) -> ShotAction:
         if self.active_source == "heuristic":
+            self._prepared_hitter_shot = None
             return self.heuristic_opponent.choose_hitter_action(state, config, server_side)
         observation = self.observation_encoder.encode(
             state=state,
@@ -513,12 +687,66 @@ class MixedCheckpointOpponent(OpponentPolicy):
         )
         if self.current_model is None:
             raise RuntimeError("Checkpoint opponent model was not loaded for this episode.")
+        observation = adapt_observation_to_model(self.current_model, observation)
         action, _ = self.current_model.predict(
             observation,
             deterministic=self._deterministic_for_role("hitter"),
         )
         decoded = self.action_mapper.decode_hitter_for_agent(_model_action_value(action), state, self.current_side).shot_action
-        return self.action_mapper.project_hitter_action(state, decoded).shot_action
+        projected = self.action_mapper.project_hitter_action(state, decoded)
+        self._prepared_hitter_shot = projected.prepared_shot
+        return projected.shot_action
+
+    def choose_likely_hitter_actions(
+        self,
+        state: StageState,
+        config: SimulationConfig,
+        server_side: Side,
+        *,
+        count: int,
+    ) -> list[HitterActionCandidate]:
+        if self.active_source == "heuristic":
+            return [
+                HitterActionCandidate(
+                    flat_index=None,
+                    action=self.heuristic_opponent.choose_hitter_action(state, config, server_side),
+                    probability=1.0,
+                    prepared_shot=None,
+                )
+            ]
+        if self.current_model is None:
+            raise RuntimeError("Checkpoint opponent model was not loaded for this episode.")
+        observation = self.observation_encoder.encode(
+            state=state,
+            agent_side=self.current_side,
+            role="hitter",
+            server_side=server_side,
+            pending_action=None,
+            feasible_indices=[],
+        )
+        candidates: list[HitterActionCandidate] = []
+        for flat_index, probability in _top_hitter_action_indices(
+            self.current_model,
+            observation,
+            hitter_action_count=self.action_mapper.hitter_action_count,
+            count=count,
+        ):
+            decoded = self.action_mapper.decode_hitter_for_agent(flat_index, state, self.current_side).shot_action
+            projected = self.action_mapper.project_hitter_action(state, decoded)
+            candidates.append(
+                HitterActionCandidate(
+                    flat_index=int(flat_index),
+                    action=projected.shot_action,
+                    probability=float(probability),
+                    prepared_shot=projected.prepared_shot,
+                )
+            )
+        return candidates
+
+    def take_prepared_hitter_shot(self) -> PreparedShot | None:
+        prepared = self._prepared_hitter_shot
+        self._prepared_hitter_shot = None
+        return prepared
 
     def choose_intercept_index(
         self,
@@ -527,6 +755,8 @@ class MixedCheckpointOpponent(OpponentPolicy):
         feasible_indices: list[int],
         config: SimulationConfig,
         server_side: Side,
+        *,
+        prepared_shot: PreparedShot | None = None,
     ) -> int | None:
         if self.active_source == "heuristic":
             return self.heuristic_opponent.choose_intercept_index(state, action, feasible_indices, config, server_side)
@@ -537,6 +767,7 @@ class MixedCheckpointOpponent(OpponentPolicy):
             server_side=server_side,
             pending_action=action,
             feasible_indices=feasible_indices,
+            prepared_shot=prepared_shot,
         )
         if self.current_model is None:
             raise RuntimeError("Checkpoint opponent model was not loaded for this episode.")
@@ -590,7 +821,7 @@ class SelfPlayCheckpointCallback(BaseCallback):
         ensure_directory(self.checkpoint_dir)
         checkpoint_path = self.checkpoint_dir / f"selfplay_step_{effective_timestep}.zip"
         self.model.save(checkpoint_path)
-        self.model.save(self.latest_model_path)
+        replace_with_existing_file(checkpoint_path, self.latest_model_path)
         self._prune_snapshots()
         if hasattr(self.train_env, "env_method"):
             self.train_env.env_method("refresh_opponent_pool")
@@ -826,6 +1057,8 @@ class SelfPlayEvalCallback(BaseCallback):
                     tactic_runtime=self.tactic_runtime_config,
                     reset_sampling=self.reset_sampling_config,
                     reward=self.reward_config,
+                    recovery_counterfactual_other_sample_count=0,
+                    recovery_counterfactual_expected_response_target=False,
                 ),
                 discrete_action_config=self.discrete_action_config,
                 opponent=make_opponent("safe", seed=base_seed + 1),
@@ -867,6 +1100,8 @@ class SelfPlayEvalCallback(BaseCallback):
                 seed=base_seed + 11,
                 discrete_action_config=self.discrete_action_config,
                 opponent=mirror_opponent,
+                recovery_counterfactual_other_sample_count=0,
+                recovery_counterfactual_expected_response_target=False,
             )
             mirror_summary = self._evaluate_fixed_server_matchup(
                 selector=selector,
@@ -888,6 +1123,8 @@ class SelfPlayEvalCallback(BaseCallback):
                     seed=base_seed + 11,
                     discrete_action_config=self.discrete_action_config,
                     opponent=mirror_opponent,
+                    recovery_counterfactual_other_sample_count=0,
+                    recovery_counterfactual_expected_response_target=False,
                 ),
                 seed_base=base_seed + 11_000,
             )
@@ -925,6 +1162,8 @@ class SelfPlayEvalCallback(BaseCallback):
                             tactic_runtime_config=self.tactic_runtime_config,
                             deterministic=self.deterministic,
                         ),
+                        recovery_counterfactual_other_sample_count=0,
+                        recovery_counterfactual_expected_response_target=False,
                     ),
                     seed_base=base_seed + 3_000,
                 )
@@ -959,6 +1198,8 @@ class SelfPlayEvalCallback(BaseCallback):
                         tactic_runtime_config=self.tactic_runtime_config,
                         deterministic=self.deterministic,
                     ),
+                    recovery_counterfactual_other_sample_count=0,
+                    recovery_counterfactual_expected_response_target=False,
                 ),
                 seed_base=base_seed + 7_000,
             )
@@ -1193,6 +1434,10 @@ def build_selfplay_env(
     discrete_action_config: DiscreteActionConfig,
     opponent: OpponentPolicy,
     include_records_in_info: bool = False,
+    recovery_counterfactual_other_sample_count: int = RECOVERY_COUNTERFACTUAL_OTHER_SAMPLE_COUNT,
+    counterfactual_opponent_response_samples: int = COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES,
+    recovery_counterfactual_expected_response_target: bool = True,
+    recovery_full_diagnostics_probability: float = 0.0,
 ) -> BadmintonRLEnv:
     return BadmintonRLEnv(
         config=sim_config or SimulationConfig(),
@@ -1210,6 +1455,10 @@ def build_selfplay_env(
             tactic_runtime=tactic_runtime_config or TacticRuntimeConfig(),
             reward=reward_config or RewardConfig(),
             reset_sampling=reset_sampling_config or ResetSamplingConfig(),
+            recovery_counterfactual_other_sample_count=recovery_counterfactual_other_sample_count,
+            counterfactual_opponent_response_samples=counterfactual_opponent_response_samples,
+            recovery_counterfactual_expected_response_target=recovery_counterfactual_expected_response_target,
+            recovery_full_diagnostics_probability=recovery_full_diagnostics_probability,
         ),
         discrete_action_config=discrete_action_config,
         opponent=opponent,

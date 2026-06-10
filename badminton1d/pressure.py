@@ -6,7 +6,7 @@ from math import isfinite
 import numpy as np
 
 from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import candidate_intercept_points, reaction_time_for_side
+from badminton1d.dynamics import candidate_intercept_points, reaction_miss_probability, reaction_time_for_side
 from badminton1d.movement import closest_intercept_body_target
 from badminton1d.playback import MatchTrace, StageTrace
 from badminton1d.state import ShotAction, Side, StageRecord, StageState
@@ -15,9 +15,10 @@ from badminton1d.utils import player_position, player_velocity
 
 @dataclass(frozen=True)
 class ShotPressureWeights:
-    required_speed: float = 0.45
-    intercept_scarcity: float = 0.35
-    low_contact: float = 0.20
+    required_speed: float = 0.35
+    intercept_scarcity: float = 0.30
+    low_contact: float = 0.15
+    reaction_miss: float = 0.20
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class ShotPressureIndex:
     required_speed_score: float
     intercept_scarcity_score: float
     low_contact_score: float
+    reaction_miss_score: float
     required_speed: float
     required_speed_ratio: float
     feasible_intercept_count: int
@@ -33,6 +35,7 @@ class ShotPressureIndex:
     best_contact_height: float | None
     chosen_contact_height: float | None
     chosen_required_speed: float | None
+    chosen_reaction_miss_probability: float | None
     terminal_reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -189,15 +192,18 @@ def shot_pressure_from_candidates(
 
     best_contact_height = _best_feasible_contact_height(candidate_zs, feasible)
     low_contact_score = _low_contact_score(best_contact_height, config)
+    reaction_miss_score = _reaction_miss_score(candidate_times, feasible, config)
 
     chosen_height = None
     chosen_required_speed = None
+    chosen_reaction_miss_probability = None
     if chosen_point is not None:
         chosen_height = float(chosen_point[2])
         time_for_choice = chosen_time
         if time_for_choice is None and chosen_index is not None and 0 <= chosen_index < candidate_count:
             time_for_choice = float(candidate_times[chosen_index])
         if time_for_choice is not None:
+            chosen_reaction_miss_probability = float(reaction_miss_probability(float(time_for_choice), config))
             chosen_required_speed = _required_horizontal_speed(
                 receiver_start,
                 receiver_velocity,
@@ -213,6 +219,7 @@ def shot_pressure_from_candidates(
         required_speed_score=required_speed_score,
         intercept_scarcity_score=scarcity_score,
         low_contact_score=low_contact_score,
+        reaction_miss_score=reaction_miss_score,
         weights=active_weights,
     )
     return ShotPressureIndex(
@@ -220,6 +227,7 @@ def shot_pressure_from_candidates(
         required_speed_score=required_speed_score,
         intercept_scarcity_score=scarcity_score,
         low_contact_score=low_contact_score,
+        reaction_miss_score=reaction_miss_score,
         required_speed=float(best_required_speed),
         required_speed_ratio=float(speed_ratio),
         feasible_intercept_count=feasible_count,
@@ -227,6 +235,7 @@ def shot_pressure_from_candidates(
         best_contact_height=best_contact_height,
         chosen_contact_height=chosen_height,
         chosen_required_speed=chosen_required_speed,
+        chosen_reaction_miss_probability=chosen_reaction_miss_probability,
         terminal_reason=terminal_reason,
     )
 
@@ -429,17 +438,32 @@ def _low_contact_score(best_contact_height: float | None, config: SimulationConf
     return float(1.0 - np.clip((best_contact_height - config.player.z_min) / z_span, 0.0, 1.0))
 
 
+def _reaction_miss_score(candidate_times: np.ndarray, feasible_indices: list[int], config: SimulationConfig) -> float:
+    if not feasible_indices:
+        return 1.0
+    probabilities = [
+        float(reaction_miss_probability(float(candidate_times[index]), config))
+        for index in feasible_indices
+        if 0 <= int(index) < len(candidate_times)
+    ]
+    if not probabilities:
+        return 1.0
+    return float(np.clip(np.mean(probabilities), 0.0, 1.0))
+
+
 def _weighted_score(
     *,
     required_speed_score: float,
     intercept_scarcity_score: float,
     low_contact_score: float,
+    reaction_miss_score: float,
     weights: ShotPressureWeights,
 ) -> float:
     weight_values = [
         max(float(weights.required_speed), 0.0),
         max(float(weights.intercept_scarcity), 0.0),
         max(float(weights.low_contact), 0.0),
+        max(float(weights.reaction_miss), 0.0),
     ]
     total = sum(weight_values)
     if total <= 0.0:
@@ -448,6 +472,7 @@ def _weighted_score(
         weight_values[0] * required_speed_score
         + weight_values[1] * intercept_scarcity_score
         + weight_values[2] * low_contact_score
+        + weight_values[3] * reaction_miss_score
     ) / total
     return float(np.clip(value, 0.0, 1.0))
 

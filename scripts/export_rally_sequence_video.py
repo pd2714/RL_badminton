@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-sampling-mode", choices=("uniform", "random"), default="uniform")
     parser.add_argument("--initial-server", choices=("left", "right", "train", "opponent", "random"), default="random")
     parser.add_argument("--random-server-each-rally", action="store_true")
+    parser.add_argument("--fixed-server-each-rally", action="store_true")
     parser.add_argument("--start-rally", type=int, default=0)
     parser.add_argument("--end-rally", type=int, default=100)
     parser.add_argument("--target-score", type=int, default=None)
@@ -105,7 +106,10 @@ def _resolve_next_server(
     train_side: Side,
     random_server_each_rally: bool,
     rng: np.random.Generator,
+    fixed_server_each_rally: bool = False,
 ) -> Side:
+    if fixed_server_each_rally:
+        return current_server
     if random_server_each_rally:
         return _resolve_initial_server("random", train_side, rng)
     if winner == "left":
@@ -206,6 +210,8 @@ def _build_env(args: argparse.Namespace, *, model: PPO) -> BadmintonRLEnv:
         discrete_action_config=discrete_action_config,
         opponent=opponent,
         include_records_in_info=True,
+        recovery_counterfactual_other_sample_count=0,
+        recovery_counterfactual_expected_response_target=False,
     )
 
 
@@ -342,6 +348,7 @@ def main() -> None:
             current_server=current_server,
             train_side=args.train_side,
             random_server_each_rally=args.random_server_each_rally,
+            fixed_server_each_rally=args.fixed_server_each_rally,
             rng=rng,
         )
 
@@ -434,6 +441,7 @@ def main() -> None:
         "initial_server": args.initial_server,
         "resolved_initial_server": initial_server,
         "random_server_each_rally": args.random_server_each_rally,
+        "fixed_server_each_rally": args.fixed_server_each_rally,
         "seed": args.seed,
         "deterministic": args.deterministic,
         "policy_type": args.policy_type,

@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anchor-step-interval", type=int, default=None)
     parser.add_argument("--rating-pool-dir", type=Path, default=None, help="Fixed rating-pool directory to evaluate against.")
     parser.add_argument("--pool-checkpoint-name", default="final_model.zip")
+    parser.add_argument(
+        "--skip-recovery-choice-diagnostics",
+        action="store_true",
+        help="Do not recompute recovery-bin rank/best-bin diagnostics during anchor evaluation.",
+    )
     return parser.parse_args()
 
 
@@ -51,6 +56,7 @@ def main() -> None:
             anchor_step_interval=args.anchor_step_interval,
             rating_pool_dir=args.rating_pool_dir,
             pool_checkpoint_name=args.pool_checkpoint_name,
+            recovery_choice_diagnostics=not args.skip_recovery_choice_diagnostics,
         ),
     )
     print(f"anchors: {report['anchor_count']}")

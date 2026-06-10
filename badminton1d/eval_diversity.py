@@ -51,6 +51,8 @@ def run_diversity_evaluation(
             opponent_reaction_time=eval_config.opponent_reaction_time,
             reset_sampling=eval_config.reset_sampling_config,
             reward=eval_config.reward_config,
+            recovery_counterfactual_other_sample_count=0,
+            recovery_counterfactual_expected_response_target=False,
         ),
         discrete_action_config=discrete_action_config,
         opponent=make_opponent("safe", seed=eval_config.seed + 1),
@@ -70,6 +72,8 @@ def run_diversity_evaluation(
             opponent_reaction_time=eval_config.opponent_reaction_time,
             reset_sampling=eval_config.reset_sampling_config,
             reward=eval_config.reward_config,
+            recovery_counterfactual_other_sample_count=0,
+            recovery_counterfactual_expected_response_target=False,
         ),
         discrete_action_config=discrete_action_config,
         opponent=LiveModelOpponent(
@@ -100,6 +104,8 @@ def run_diversity_evaluation(
                     opponent_reaction_time=eval_config.opponent_reaction_time,
                     reset_sampling=eval_config.reset_sampling_config,
                     reward=eval_config.reward_config,
+                    recovery_counterfactual_other_sample_count=0,
+                    recovery_counterfactual_expected_response_target=False,
                 ),
                 discrete_action_config=discrete_action_config,
                 opponent=FixedCheckpointOpponent(

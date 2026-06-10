@@ -42,6 +42,7 @@ CONTINUOUS_LOG_STD_MIN = CONTINUOUS_LOG_STD
 CONTINUOUS_LOG_STD_MAX = CONTINUOUS_LOG_STD
 MIXED_RECOVERY_LOG_STD = -2.0
 CONDITIONAL_RECOVERY_CONTEXT_DIM = 10
+CONDITIONAL_RECOVERY_CONTEXT_CACHE_SIZE = 32_768
 
 
 def _denormalize_signed(value: float, scale: float) -> float:
@@ -247,6 +248,7 @@ class MaskedBadmintonPolicy(ActorCriticPolicy):
         self.policy_type = normalized_policy_type
         self.output_mode = CONDITIONAL_PROB_MODE if self.policy_type in CONDITIONAL_DISCRETE_MODES else self.policy_type
         self.mask_mid_rally_hitter_actions = bool(mask_mid_rally_hitter_actions)
+        self._conditional_recovery_context_cache: dict[tuple[StageState, int], tuple[float, ...]] = {}
         self._action_mapper = None
         if sim_config is not None:
             self._action_mapper = DiscreteActionMapper(
@@ -707,29 +709,47 @@ class MaskedBadmintonPolicy(ActorCriticPolicy):
                         * self._conditional_recovery_count
                     )
                 )
-                shot_action = self._action_mapper.decode_hitter(flat_action, state).shot_action
-                landing_x, landing_y = landing_position(state, shot_action, config)
-                shot_phi = float(np.arctan2(shot_action.v_y, shot_action.v_x))
-                horizontal_speed = float(np.hypot(shot_action.v_x, shot_action.v_y))
-                shot_theta = float(np.arctan2(shot_action.v_z, horizontal_speed))
-                shot_speed = float(np.sqrt(shot_action.v_x**2 + shot_action.v_y**2 + shot_action.v_z**2))
-                features.append(
-                    [
-                        float(np.sin(shot_phi)),
-                        float(np.cos(shot_phi)),
-                        float(np.sin(shot_theta)),
-                        float(np.cos(shot_theta)),
-                        float(np.clip(shot_action.v_x / max_velocity, -1.0, 1.0)),
-                        float(np.clip(shot_action.v_y / max_velocity, -1.0, 1.0)),
-                        float(np.clip(shot_action.v_z / max_velocity, -1.0, 1.0)),
-                        float(np.clip(shot_speed / max_velocity, 0.0, 1.0)),
-                        float(np.clip(landing_x / max(config.court.half_width, 1e-6), -1.0, 1.0)),
-                        float(np.clip(landing_y / max(config.court.half_length, 1e-6), -1.0, 1.0)),
-                    ]
-                )
+                features.append(list(self._cached_conditional_recovery_features(state, flat_action, max_velocity)))
             except (RuntimeError, ValueError, IndexError, FloatingPointError):
                 features.append([0.0] * CONDITIONAL_RECOVERY_CONTEXT_DIM)
         return th.as_tensor(features, dtype=dtype, device=obs.device)
+
+    def _cached_conditional_recovery_features(
+        self,
+        state: StageState,
+        flat_action: int,
+        max_velocity: float,
+    ) -> tuple[float, ...]:
+        cache_key = (state, int(flat_action))
+        cached = self._conditional_recovery_context_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        if self._action_mapper is None:
+            return (0.0,) * CONDITIONAL_RECOVERY_CONTEXT_DIM
+
+        config = self._action_mapper.config
+        shot_action = self._action_mapper.decode_hitter(flat_action, state).shot_action
+        landing_x, landing_y = landing_position(state, shot_action, config)
+        shot_phi = float(np.arctan2(shot_action.v_y, shot_action.v_x))
+        horizontal_speed = float(np.hypot(shot_action.v_x, shot_action.v_y))
+        shot_theta = float(np.arctan2(shot_action.v_z, horizontal_speed))
+        shot_speed = float(np.sqrt(shot_action.v_x**2 + shot_action.v_y**2 + shot_action.v_z**2))
+        computed = (
+            float(np.sin(shot_phi)),
+            float(np.cos(shot_phi)),
+            float(np.sin(shot_theta)),
+            float(np.cos(shot_theta)),
+            float(np.clip(shot_action.v_x / max_velocity, -1.0, 1.0)),
+            float(np.clip(shot_action.v_y / max_velocity, -1.0, 1.0)),
+            float(np.clip(shot_action.v_z / max_velocity, -1.0, 1.0)),
+            float(np.clip(shot_speed / max_velocity, 0.0, 1.0)),
+            float(np.clip(landing_x / max(config.court.half_width, 1e-6), -1.0, 1.0)),
+            float(np.clip(landing_y / max(config.court.half_length, 1e-6), -1.0, 1.0)),
+        )
+        if len(self._conditional_recovery_context_cache) >= CONDITIONAL_RECOVERY_CONTEXT_CACHE_SIZE:
+            self._conditional_recovery_context_cache.clear()
+        self._conditional_recovery_context_cache[cache_key] = computed
+        return computed
 
     def _sample_categorical(self, logits: th.Tensor, deterministic: bool) -> th.Tensor:
         if deterministic:

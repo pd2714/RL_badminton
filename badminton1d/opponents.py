@@ -8,6 +8,7 @@ import numpy as np
 from badminton1d.action_space import DiscreteActionMapper
 from badminton1d.agents import GreedyReceiver, RandomValidHitter, SafeHitter
 from badminton1d.config import SimulationConfig
+from badminton1d.dynamics import PreparedShot
 from badminton1d.state import ShotAction, Side, StageState
 
 
@@ -31,6 +32,16 @@ class OpponentPolicy(Protocol):
     def choose_hitter_action(self, state: StageState, config: SimulationConfig, server_side: Side) -> ShotAction:
         ...
 
+    def choose_likely_hitter_actions(
+        self,
+        state: StageState,
+        config: SimulationConfig,
+        server_side: Side,
+        *,
+        count: int,
+    ) -> list["HitterActionCandidate"]:
+        ...
+
     def choose_intercept_index(
         self,
         state: StageState,
@@ -38,6 +49,8 @@ class OpponentPolicy(Protocol):
         feasible_indices: list[int],
         config: SimulationConfig,
         server_side: Side,
+        *,
+        prepared_shot: PreparedShot | None = None,
     ) -> int | None:
         ...
 
@@ -80,6 +93,8 @@ class SafeHeuristicOpponent:
         feasible_indices: list[int],
         config: SimulationConfig,
         server_side: Side,
+        *,
+        prepared_shot: PreparedShot | None = None,
     ) -> int | None:
         return self.receiver.choose_intercept_index(state, action, feasible_indices, config)
 
@@ -119,6 +134,8 @@ class RandomValidOpponent:
         feasible_indices: list[int],
         config: SimulationConfig,
         server_side: Side,
+        *,
+        prepared_shot: PreparedShot | None = None,
     ) -> int | None:
         return self.receiver.choose_intercept_index(state, action, feasible_indices, config)
 
@@ -161,6 +178,8 @@ class GreedyInterceptOpponent:
         feasible_indices: list[int],
         config: SimulationConfig,
         server_side: Side,
+        *,
+        prepared_shot: PreparedShot | None = None,
     ) -> int | None:
         return self.receiver.choose_intercept_index(state, action, feasible_indices, config)
 
@@ -183,6 +202,14 @@ class DecisionContext:
     pending_action: ShotAction | None
     feasible_indices: list[int]
     receiver_action_count: int
+
+
+@dataclass(frozen=True)
+class HitterActionCandidate:
+    flat_index: int | None
+    action: ShotAction
+    probability: float = 1.0
+    prepared_shot: PreparedShot | None = None
 
 
 class BaselinePolicy(Protocol):

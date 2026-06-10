@@ -20,6 +20,35 @@ class ActionSelector(Protocol):
         ...
 
 
+def adapt_observation_to_model(model: PPO, observation: np.ndarray) -> np.ndarray:
+    expected_shape = getattr(getattr(model, "observation_space", None), "shape", None)
+    if not isinstance(expected_shape, (tuple, list)) or not expected_shape:
+        return observation
+    expected = int(expected_shape[0])
+    obs = np.asarray(observation, dtype=np.float32)
+    actual = int(obs.shape[-1])
+    if actual == expected:
+        return obs
+
+    if actual > expected:
+        if actual - expected == 4:
+            return obs[..., :expected]
+        if actual - expected == 8:
+            return np.concatenate([obs[..., :29], obs[..., 33:-4]], axis=-1)
+        return obs[..., :expected]
+
+    adapted_shape = (*obs.shape[:-1], expected)
+    adapted = np.zeros(adapted_shape, dtype=np.float32)
+    if expected - actual == 4:
+        adapted[..., :actual] = obs
+    elif expected - actual == 8:
+        adapted[..., :29] = obs[..., :29]
+        adapted[..., 33:-4] = obs[..., 29:]
+    else:
+        adapted[..., :actual] = obs
+    return adapted
+
+
 def choose_model_action(
     model: PPO,
     observation: np.ndarray,
@@ -27,6 +56,7 @@ def choose_model_action(
     *,
     deterministic: bool = True,
 ) -> int:
+    observation = adapt_observation_to_model(model, observation)
     if isinstance(model.action_space, spaces.Box):
         action, _ = model.predict(observation, deterministic=deterministic)
         if context.role == "receiver":
@@ -70,6 +100,7 @@ class ModelSelector:
 
     def choose_action(self, observation: np.ndarray, context: DecisionContext) -> object:
         if isinstance(self.model.action_space, spaces.Box):
+            observation = adapt_observation_to_model(self.model, observation)
             action, _ = self.model.predict(observation, deterministic=self.deterministic)
             return action
         return choose_model_action(self.model, observation, context, deterministic=self.deterministic)

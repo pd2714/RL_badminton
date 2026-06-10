@@ -47,8 +47,8 @@ class StageTrace:
     vertical_drag_coefficient: float | None = None
     left_start_velocity: tuple[float, float] = (0.0, 0.0)
     right_start_velocity: tuple[float, float] = (0.0, 0.0)
-    player_v_max: float = 4.0
-    player_acceleration: float = 6.5
+    player_v_max: float = PlayerConfig().v_max
+    player_acceleration: float = PlayerConfig().acceleration
     player_deceleration: float | None = None
     player_movement_model: str = "accelerated"
     player_r_reach: float = PlayerConfig().r_reach
@@ -471,8 +471,8 @@ def stage_trace_from_dict(payload: dict[str, object]) -> StageTrace:
     trace_payload.setdefault("receiver_reaction_time", 0.0)
     trace_payload.setdefault("left_start_velocity", (0.0, 0.0))
     trace_payload.setdefault("right_start_velocity", (0.0, 0.0))
-    trace_payload.setdefault("player_v_max", 4.0)
-    trace_payload.setdefault("player_acceleration", 6.5)
+    trace_payload.setdefault("player_v_max", PlayerConfig().v_max)
+    trace_payload.setdefault("player_acceleration", PlayerConfig().acceleration)
     trace_payload.setdefault("player_deceleration", None)
     trace_payload.setdefault("player_movement_model", "accelerated")
     trace_payload.setdefault("player_r_reach", PlayerConfig().r_reach)

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import landing_position
+from badminton1d.dynamics import PreparedShot, candidate_intercept_points, landing_position, reaction_miss_probability
 from badminton1d.state import ShotAction, Side, StageState
 from badminton1d.utils import canonicalize_shot_action_for_agent, canonicalize_state_for_agent, side_to_agent_canonical
 
@@ -15,6 +15,7 @@ class ObservationConfig:
     max_score: int = 11
     max_stages_per_rally: int = 30
     include_feasible_mask: bool = True
+    include_reaction_risk_features: bool = True
 
 
 class ObservationEncoder:
@@ -32,7 +33,8 @@ class ObservationEncoder:
         pending = 11
         movement = 4
         mask = self.config.action.intercept_count if self.observation_config.include_feasible_mask else 0
-        return base + pending + movement + mask
+        reaction_risk = 4 if self.observation_config.include_reaction_risk_features else 0
+        return base + pending + movement + mask + reaction_risk
 
     def feature_names(self) -> list[str]:
         names = [
@@ -72,6 +74,15 @@ class ObservationEncoder:
         ]
         if self.observation_config.include_feasible_mask:
             names.extend(f"feasible_intercept_{index}" for index in range(self.config.action.intercept_count))
+        if self.observation_config.include_reaction_risk_features:
+            names.extend(
+                [
+                    "earliest_feasible_intercept_time",
+                    "min_feasible_reaction_miss_probability",
+                    "mean_feasible_reaction_miss_probability",
+                    "zero_miss_feasible_fraction",
+                ]
+            )
         return names
 
     def encode(
@@ -85,6 +96,7 @@ class ObservationEncoder:
         score_right: int = 0,
         pending_action: ShotAction | None = None,
         feasible_indices: list[int] | None = None,
+        prepared_shot: PreparedShot | None = None,
     ) -> np.ndarray:
         feasible_indices = feasible_indices or []
         canonical_state = canonicalize_state_for_agent(state, agent_side)
@@ -106,7 +118,19 @@ class ObservationEncoder:
         landing_x = 0.0
         landing_y = 0.0
         if canonical_pending_action is not None:
-            landing_x, landing_y = landing_position(canonical_state, canonical_pending_action, self.config)
+            if prepared_shot is None:
+                landing_x, landing_y = landing_position(canonical_state, canonical_pending_action, self.config)
+            else:
+                landing_x = float(prepared_shot.trajectory.landing_x)
+                landing_y = float(prepared_shot.trajectory.landing_y)
+                if agent_side == "right":
+                    landing_y = -landing_y
+        reaction_risk_features = self._reaction_risk_features(
+            canonical_state,
+            canonical_pending_action,
+            feasible_indices,
+            candidate_times=None if prepared_shot is None else prepared_shot.candidate_times,
+        )
 
         max_velocity = max(
             abs(self.config.action.vx_min),
@@ -156,7 +180,43 @@ class ObservationEncoder:
         ]
         if self.observation_config.include_feasible_mask:
             features.extend(mask.tolist())
+        if self.observation_config.include_reaction_risk_features:
+            features.extend(reaction_risk_features)
         return np.asarray(features, dtype=np.float32)
+
+    def _reaction_risk_features(
+        self,
+        state: StageState,
+        pending_action: ShotAction | None,
+        feasible_indices: list[int],
+        *,
+        candidate_times: np.ndarray | None = None,
+    ) -> list[float]:
+        if pending_action is None:
+            return [0.0, 0.0, 0.0, 0.0]
+        if candidate_times is None:
+            times, _, _, _ = candidate_intercept_points(state, pending_action, self.config)
+        else:
+            times = candidate_times
+        valid_indices = [int(index) for index in feasible_indices if 0 <= int(index) < len(times)]
+        if not valid_indices:
+            return [0.0, 1.0, 1.0, 0.0]
+
+        feasible_times = np.asarray([float(times[index]) for index in valid_indices], dtype=np.float64)
+        miss_probabilities = np.asarray(
+            [reaction_miss_probability(float(time), self.config) for time in feasible_times],
+            dtype=np.float64,
+        )
+        safe = miss_probabilities <= 1e-8
+        return [
+            self._normalize_unit(float(np.min(feasible_times)), 0.0, self._reaction_time_scale()),
+            float(np.clip(np.min(miss_probabilities), 0.0, 1.0)),
+            float(np.clip(np.mean(miss_probabilities), 0.0, 1.0)),
+            float(np.mean(safe)),
+        ]
+
+    def _reaction_time_scale(self) -> float:
+        return max(float(self.config.action.reaction_miss_zero_threshold), 1e-6)
 
     def _normalize_x(self, value: float) -> float:
         return self._normalize_signed(value, self.config.court.half_width)

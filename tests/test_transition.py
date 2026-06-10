@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
 from badminton1d.dynamics import (
     REACTION_MISS_FLIGHT_TIME_THRESHOLD,
@@ -10,8 +12,10 @@ from badminton1d.dynamics import (
     REACTION_MISS_ZERO_FLIGHT_TIME_THRESHOLD,
     candidate_intercept_points,
     feasible_intercept_indices,
+    prepare_shot,
     reaction_miss_probability,
     step_stage,
+    trajectory_result,
 )
 from badminton1d.movement import advance_player_toward, intercept_body_target_after_reaction
 from badminton1d.state import ShotAction, StageState
@@ -147,11 +151,11 @@ class TransitionTests(unittest.TestCase):
         self.assertLess(len(delayed_feasible), len(base_feasible))
 
     def test_reaction_miss_probability_uses_default_curve(self) -> None:
-        self.assertAlmostEqual(reaction_miss_probability(0.05), 0.9)
-        self.assertAlmostEqual(reaction_miss_probability(REACTION_MISS_FLIGHT_TIME_THRESHOLD), 0.9)
-        self.assertAlmostEqual(reaction_miss_probability(0.3), 0.6)
-        self.assertAlmostEqual(reaction_miss_probability(REACTION_MISS_SECONDARY_FLIGHT_TIME_THRESHOLD), 0.3)
-        self.assertAlmostEqual(reaction_miss_probability(0.6), 0.15)
+        self.assertAlmostEqual(reaction_miss_probability(0.05), 0.8)
+        self.assertAlmostEqual(reaction_miss_probability(REACTION_MISS_FLIGHT_TIME_THRESHOLD), 0.8)
+        self.assertAlmostEqual(reaction_miss_probability(0.3), 0.4)
+        self.assertAlmostEqual(reaction_miss_probability(REACTION_MISS_SECONDARY_FLIGHT_TIME_THRESHOLD), 0.0)
+        self.assertAlmostEqual(reaction_miss_probability(0.6), 0.0)
         self.assertAlmostEqual(reaction_miss_probability(REACTION_MISS_ZERO_FLIGHT_TIME_THRESHOLD), 0.0)
         self.assertAlmostEqual(reaction_miss_probability(0.8), 0.0)
 
@@ -233,15 +237,17 @@ class TransitionTests(unittest.TestCase):
         self.assertGreaterEqual(chosen_time, REACTION_MISS_FLIGHT_TIME_THRESHOLD)
         self.assertLess(chosen_time, REACTION_MISS_SECONDARY_FLIGHT_TIME_THRESHOLD)
         miss_probability = reaction_miss_probability(chosen_time, config)
-        self.assertGreater(miss_probability, 0.3)
-        self.assertLess(miss_probability, 0.9)
+        self.assertGreater(miss_probability, 0.0)
+        self.assertLess(miss_probability, 0.8)
 
         with patch("badminton1d.dynamics.np.random.random", return_value=miss_probability - 0.01):
             missed_record = step_stage(state, action, chosen, config)
+            no_miss_record = step_stage(state, action, chosen, config, enable_reaction_miss=False)
         with patch("badminton1d.dynamics.np.random.random", return_value=miss_probability + 0.01):
             returned_record = step_stage(state, action, chosen, config)
 
         self.assertEqual(missed_record.terminal_reason, "reaction_miss")
+        self.assertNotEqual(no_miss_record.terminal_reason, "reaction_miss")
         self.assertNotEqual(returned_record.terminal_reason, "reaction_miss")
 
     def test_one_dimensional_mode_keeps_x_positions_collapsed(self) -> None:
@@ -267,6 +273,41 @@ class TransitionTests(unittest.TestCase):
         self.assertAlmostEqual(record.next_state.x0, 0.0)
         self.assertAlmostEqual(record.next_state.x_left, 0.0)
         self.assertAlmostEqual(record.next_state.x_right, 0.0)
+
+    def test_prepared_drag_shot_reuses_trajectory_without_changing_transition(self) -> None:
+        config = SimulationConfig(action=ActionConfig(trajectory_mode="drag_square"))
+        state = StageState(
+            x_left=-0.5,
+            y_left=-2.5,
+            x_right=0.5,
+            y_right=2.5,
+            current_hitter="left",
+            x0=-0.5,
+            y0=-2.5,
+            z0=1.7,
+            stage_index=1,
+        )
+        action = ShotAction(v_x=0.9, v_y=5.8, v_z=5.0, x_rec=0.0, y_rec=-1.8)
+
+        with patch("badminton1d.dynamics.trajectory_result", wraps=trajectory_result) as mocked_result:
+            prepared = prepare_shot(state, action, config)
+            self.assertTrue(prepared.feasible_indices)
+            chosen = prepared.feasible_indices[0]
+            reused = step_stage(
+                state,
+                action,
+                chosen,
+                config,
+                enable_reaction_miss=False,
+                prepared_shot=prepared,
+            )
+            self.assertEqual(mocked_result.call_count, 1)
+
+        direct = step_stage(state, action, chosen, config, enable_reaction_miss=False)
+        self.assertEqual(reused.next_state, direct.next_state)
+        self.assertEqual(reused.feasible_indices, direct.feasible_indices)
+        np.testing.assert_allclose(reused.candidate_times, direct.candidate_times)
+        self.assertEqual(reused.intercept_point, direct.intercept_point)
 
 
 if __name__ == "__main__":

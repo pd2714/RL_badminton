@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
 
 from badminton1d.action_space import (
-    VELOCITY_ORIENTED_MIDRALLY_LEFT_COURT_PHI_TRIM_DEG,
-    VELOCITY_ORIENTED_MIDRALLY_RIGHT_COURT_PHI_TRIM_DEG,
+    VELOCITY_ORIENTED_MIDRALLY_FAR_BOUNDARY_PHI_TRIM_DEG,
+    VELOCITY_ORIENTED_MIDRALLY_NEAR_BOUNDARY_PHI_TRIM_DEG,
     VELOCITY_ORIENTED_PHI_CLUSTER_POWER,
     VELOCITY_ORIENTED_SERVICE_PHI_BOUNDARY_TRIM_DEG,
     VELOCITY_ORIENTED_THETA_HIGH_DEG,
@@ -18,7 +18,7 @@ from badminton1d.action_space import (
 from badminton1d.agents import SafeHitter
 from badminton1d.config import ActionConfig, CourtConfig, SimulationConfig
 from badminton1d.evaluation import choose_model_action
-from badminton1d.dynamics import landing_position, validate_and_clip_shot_action
+from badminton1d.dynamics import landing_position, simulate_trajectory, validate_and_clip_shot_action
 from badminton1d.opponents import DecisionContext
 from badminton1d.policy import FEASIBLE_MASK_START_INDEX, apply_hitter_action_mask, apply_receiver_action_mask
 from badminton1d.state import ShotAction, StageState
@@ -41,6 +41,25 @@ def _expected_clustered_angle_grid(lower: float, upper: float, center: float, co
     left = center - left_span * (np.linspace(1.0, 0.0, left_intervals + 1) ** VELOCITY_ORIENTED_PHI_CLUSTER_POWER)
     right = center + right_span * (np.linspace(0.0, 1.0, right_intervals + 1) ** VELOCITY_ORIENTED_PHI_CLUSTER_POWER)
     return np.concatenate((left[:-1], right)).astype(float)
+
+
+def _expected_midrally_phi_grid(config: SimulationConfig, state: StageState, count: int) -> np.ndarray:
+    left_angle = np.arctan2(config.court.net_y - state.y0, -config.court.half_width - state.x0)
+    right_angle = np.arctan2(config.court.net_y - state.y0, config.court.half_width - state.x0)
+    near_trim = np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_NEAR_BOUNDARY_PHI_TRIM_DEG)
+    far_trim = np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_FAR_BOUNDARY_PHI_TRIM_DEG)
+    if state.x0 < 0.0:
+        left_trim, right_trim = near_trim, far_trim
+    elif state.x0 > 0.0:
+        left_trim, right_trim = far_trim, near_trim
+    else:
+        left_trim = right_trim = near_trim
+    if left_angle <= right_angle:
+        phi_low, phi_high = float(left_angle + left_trim), float(right_angle - right_trim)
+    else:
+        phi_low, phi_high = float(right_angle + right_trim), float(left_angle - left_trim)
+    forward_phi = np.pi / 2.0 if state.current_hitter == "left" else -np.pi / 2.0
+    return _expected_clustered_angle_grid(phi_low, phi_high, forward_phi, count)
 
 
 class DiscreteActionMapperTests(unittest.TestCase):
@@ -92,20 +111,7 @@ class DiscreteActionMapperTests(unittest.TestCase):
                 * discrete_config.y_rec_bins
             ),
         )
-        phi_low, phi_high = sorted(
-            (
-                np.arctan2(self.config.court.net_y - state.y0, -self.config.court.half_width - state.x0),
-                np.arctan2(self.config.court.net_y - state.y0, self.config.court.half_width - state.x0),
-            )
-        )
-        lower_trim = np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_RIGHT_COURT_PHI_TRIM_DEG)
-        upper_trim = np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_LEFT_COURT_PHI_TRIM_DEG)
-        expected_phi = _expected_clustered_angle_grid(
-            phi_low + lower_trim,
-            phi_high - upper_trim,
-            np.pi / 2.0,
-            discrete_config.phi_bins,
-        )
+        expected_phi = _expected_midrally_phi_grid(self.config, state, discrete_config.phi_bins)
         self.assertTrue(np.allclose(mapper.phi_grid(state), expected_phi))
 
         x_bounds, y_bounds = recovery_bounds(state.current_hitter, self.config)
@@ -142,7 +148,68 @@ class DiscreteActionMapperTests(unittest.TestCase):
                 for candidate_speed in speed_grid:
                     self.assertTrue(mapper._speed_valid_for_phi_theta(state, phi, theta, float(candidate_speed)))
 
+    def test_midrally_phi_grid_trims_near_boundary_less_than_far_boundary(self) -> None:
+        mapper = DiscreteActionMapper(self.config)
+        discrete_config = DiscreteActionConfig()
+        for current_hitter, y0, forward_phi in (
+            ("left", -3.5, np.pi / 2.0),
+            ("right", 3.5, -np.pi / 2.0),
+        ):
+            for x0 in (-1.2, 1.2):
+                with self.subTest(current_hitter=current_hitter, x0=x0):
+                    state = StageState(
+                        x_left=x0 if current_hitter == "left" else 0.0,
+                        y_left=y0 if current_hitter == "left" else -3.5,
+                        x_right=x0 if current_hitter == "right" else 0.0,
+                        y_right=y0 if current_hitter == "right" else 3.5,
+                        current_hitter=current_hitter,
+                        x0=x0,
+                        y0=y0,
+                        z0=1.15,
+                        stage_index=1,
+                    )
+                    expected_phi = _expected_midrally_phi_grid(self.config, state, discrete_config.phi_bins)
+                    actual_phi = mapper.phi_grid(state)
+                    self.assertTrue(np.allclose(actual_phi, expected_phi))
+                    self.assertAlmostEqual(float(actual_phi[np.argmin(np.abs(actual_phi - forward_phi))]), forward_phi)
+
     def test_discrete_recovery_bins_are_conditioned_on_shot_context(self) -> None:
+        config = SimulationConfig(action=ActionConfig(conditional_recovery_grid=True))
+        discrete_config = DiscreteActionConfig(phi_bins=5, theta_bins=5, speed_bins=5, x_rec_bins=5, y_rec_bins=5)
+        mapper = DiscreteActionMapper(config, discrete_config)
+        state = StageState(
+            x_left=0.0,
+            y_left=-3.5,
+            x_right=0.0,
+            y_right=3.5,
+            current_hitter="left",
+            x0=0.0,
+            y0=-3.5,
+            z0=1.15,
+            stage_index=1,
+        )
+
+        def flat_action(speed_index: int) -> int:
+            phi_index = discrete_config.phi_bins // 2
+            theta_index = discrete_config.theta_bins // 2
+            x_rec_index = discrete_config.x_rec_bins // 2
+            y_rec_index = discrete_config.y_rec_bins // 2
+            return (
+                ((((phi_index * discrete_config.theta_bins + theta_index) * discrete_config.speed_bins + speed_index)
+                  * discrete_config.x_rec_bins + x_rec_index)
+                 * discrete_config.y_rec_bins)
+                + y_rec_index
+            )
+
+        short = mapper.decode_hitter(flat_action(0), state).shot_action
+        deep = mapper.decode_hitter(flat_action(discrete_config.speed_bins - 1), state).shot_action
+        short_landing = landing_position(state, short, config)
+        deep_landing = landing_position(state, deep, config)
+
+        self.assertNotAlmostEqual(short_landing[1], deep_landing[1])
+        self.assertNotAlmostEqual(short.y_rec, deep.y_rec)
+
+    def test_discrete_recovery_bins_default_to_fixed_grid(self) -> None:
         discrete_config = DiscreteActionConfig(phi_bins=5, theta_bins=5, speed_bins=5, x_rec_bins=5, y_rec_bins=5)
         mapper = DiscreteActionMapper(self.config, discrete_config)
         state = StageState(
@@ -171,11 +238,10 @@ class DiscreteActionMapperTests(unittest.TestCase):
 
         short = mapper.decode_hitter(flat_action(0), state).shot_action
         deep = mapper.decode_hitter(flat_action(discrete_config.speed_bins - 1), state).shot_action
-        short_landing = landing_position(state, short, self.config)
-        deep_landing = landing_position(state, deep, self.config)
 
-        self.assertNotAlmostEqual(short_landing[1], deep_landing[1])
-        self.assertNotAlmostEqual(short.y_rec, deep.y_rec)
+        self.assertNotAlmostEqual(landing_position(state, short, self.config)[1], landing_position(state, deep, self.config)[1])
+        self.assertAlmostEqual(short.x_rec, deep.x_rec)
+        self.assertAlmostEqual(short.y_rec, deep.y_rec)
 
     def test_angle_speed_ranges_stay_inside_total_speed_bounds(self) -> None:
         discrete_config = DiscreteActionConfig(phi_bins=5, theta_bins=7, speed_bins=5, x_rec_bins=5, y_rec_bins=5)
@@ -201,6 +267,59 @@ class DiscreteActionMapperTests(unittest.TestCase):
                 self.assertGreaterEqual(lower, 0.0)
                 self.assertLessEqual(upper, 100.0 + 1e-6)
                 self.assertLessEqual(lower, upper)
+
+    def test_default_velocity_validation_caps_total_speed_not_components(self) -> None:
+        config = SimulationConfig(action=ActionConfig(trajectory_mode="drag_square"))
+        state = StageState(
+            x_left=0.0,
+            y_left=-3.5,
+            x_right=0.0,
+            y_right=3.5,
+            current_hitter="left",
+            x0=0.0,
+            y0=-3.5,
+            z0=1.15,
+            stage_index=1,
+        )
+        theta = np.deg2rad(60.0)
+        phi = np.deg2rad(80.0)
+
+        speed = 60.0
+        vh = speed * np.cos(theta)
+        valid_high_vertical = ShotAction(
+            v_x=float(vh * np.cos(phi)),
+            v_y=float(vh * np.sin(phi)),
+            v_z=float(speed * np.sin(theta)),
+            x_rec=0.0,
+            y_rec=-3.25,
+        )
+
+        validated = validate_and_clip_shot_action(state, valid_high_vertical, config)
+
+        self.assertFalse(validated.projected)
+        self.assertGreater(validated.applied.v_z, 20.0)
+        self.assertAlmostEqual(
+            float(np.linalg.norm([validated.applied.v_x, validated.applied.v_y, validated.applied.v_z])),
+            speed,
+        )
+
+        overspeed = 110.0
+        overspeed_vh = overspeed * np.cos(theta)
+        overspeed_action = ShotAction(
+            v_x=float(overspeed_vh * np.cos(phi)),
+            v_y=float(overspeed_vh * np.sin(phi)),
+            v_z=float(overspeed * np.sin(theta)),
+            x_rec=0.0,
+            y_rec=-3.25,
+        )
+
+        projected = validate_and_clip_shot_action(state, overspeed_action, config)
+
+        self.assertTrue(projected.projected)
+        self.assertAlmostEqual(
+            float(np.linalg.norm([projected.applied.v_x, projected.applied.v_y, projected.applied.v_z])),
+            config.action.vy_max_forward,
+        )
 
     def test_drag_angle_speed_range_endpoints_are_valid(self) -> None:
         config = SimulationConfig(action=ActionConfig(trajectory_mode="drag_square"))
@@ -361,6 +480,30 @@ class DiscreteActionMapperTests(unittest.TestCase):
         self.assertLessEqual(projected.shot_action.v_x, self.config.action.vx_max)
         self.assertLessEqual(projected.shot_action.v_z, self.config.action.vz_max)
         validate_and_clip_shot_action(state, projected.shot_action, self.config)
+
+    def test_fixed_recovery_decode_and_projection_reuse_drag_simulation(self) -> None:
+        config = SimulationConfig(action=ActionConfig(trajectory_mode="drag_square"))
+        mapper = DiscreteActionMapper(config)
+        state = StageState(
+            x_left=-0.5,
+            y_left=-2.5,
+            x_right=0.5,
+            y_right=2.5,
+            current_hitter="left",
+            x0=-0.5,
+            y0=-2.5,
+            z0=1.7,
+            stage_index=1,
+        )
+        action = ShotAction(v_x=0.9, v_y=5.8, v_z=5.0, x_rec=0.0, y_rec=-1.8)
+
+        with patch("badminton1d.dynamics.simulate_trajectory", wraps=simulate_trajectory) as mocked_simulate:
+            mapper.decode_hitter(0, state)
+            self.assertEqual(mocked_simulate.call_count, 0)
+
+            projected = mapper.project_hitter_action(state, action)
+            self.assertEqual(mocked_simulate.call_count, 1)
+            self.assertEqual(projected.prepared_shot.validated_action.applied, projected.shot_action)
 
     def test_one_dimensional_mode_collapses_lateral_action_bins(self) -> None:
         config = SimulationConfig(court=CourtConfig(mode="1d"))

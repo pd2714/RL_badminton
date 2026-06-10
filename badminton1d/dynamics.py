@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -26,10 +26,21 @@ from badminton1d.utils import (
 
 
 REACTION_MISS_FLIGHT_TIME_THRESHOLD = 0.1
-REACTION_MISS_PROBABILITY = 0.9
+REACTION_MISS_PROBABILITY = 0.8
 REACTION_MISS_SECONDARY_FLIGHT_TIME_THRESHOLD = 0.5
-REACTION_MISS_SECONDARY_PROBABILITY = 0.3
-REACTION_MISS_ZERO_FLIGHT_TIME_THRESHOLD = 0.7
+REACTION_MISS_SECONDARY_PROBABILITY = 0.0
+REACTION_MISS_ZERO_FLIGHT_TIME_THRESHOLD = 0.5
+
+
+@dataclass(frozen=True)
+class PreparedShot:
+    validated_action: ValidatedShotAction
+    trajectory: TrajectoryResult
+    candidate_times: np.ndarray
+    candidate_xs: np.ndarray
+    candidate_ys: np.ndarray
+    candidate_zs: np.ndarray
+    feasible_indices: list[int]
 
 
 def reaction_time_for_side(state: StageState, side: str) -> float:
@@ -336,10 +347,26 @@ def validate_and_clip_shot_action_with_result(
     vx_low = config.action.vx_min if config.court.lateral_motion_enabled else 0.0
     vx_high = config.action.vx_max if config.court.lateral_motion_enabled else 0.0
 
+    speed_cap = float(config.action.vy_max_forward)
+    velocity = np.asarray([action.v_x, action.v_y, action.v_z], dtype=float)
+    speed = float(np.linalg.norm(velocity))
+    if np.isfinite(speed) and speed > speed_cap > 0.0:
+        velocity = velocity * (speed_cap / speed)
+
+    v_x = float(np.clip(velocity[0], vx_low, vx_high))
+    v_y = float(np.clip(velocity[1], vy_low, vy_high))
+    v_z = float(np.clip(velocity[2], config.action.vz_min, config.action.vz_max))
+    clipped_speed = float(np.sqrt(v_x * v_x + v_y * v_y + v_z * v_z))
+    if np.isfinite(clipped_speed) and clipped_speed > speed_cap > 0.0:
+        scale = speed_cap / clipped_speed
+        v_x *= scale
+        v_y *= scale
+        v_z *= scale
+
     applied = ShotAction(
-        v_x=float(np.clip(action.v_x, vx_low, vx_high)),
-        v_y=float(np.clip(action.v_y, vy_low, vy_high)),
-        v_z=float(np.clip(action.v_z, config.action.vz_min, config.action.vz_max)),
+        v_x=v_x,
+        v_y=v_y,
+        v_z=v_z,
         x_rec=float(np.clip(action.x_rec, rec_x_low, rec_x_high)),
         y_rec=float(np.clip(action.y_rec, rec_y_low, rec_y_high)),
     )
@@ -482,23 +509,30 @@ def candidate_intercept_points(
     state: StageState,
     action: ShotAction,
     config: SimulationConfig,
+    *,
+    result: TrajectoryResult | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if config.action.effective_trajectory_mode == "ballistic":
         return _ballistic_candidate_points(state, action, config)
-    result = trajectory_result(state, action, config)
-    return _sample_drag_candidates(state, result, config)
+    active = result or trajectory_result(state, action, config)
+    return _sample_drag_candidates(state, active, config)
 
 
 def feasible_intercept_indices(
     state: StageState,
     action: ShotAction,
     config: SimulationConfig,
+    *,
+    result: TrajectoryResult | None = None,
+    candidates: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> list[int]:
     receiver = opponent_side(state.current_hitter)
     receiver_start = player_position(state, receiver)
     receiver_speed = player_velocity(state, receiver)
     receiver_reaction_time = reaction_time_for_side(state, receiver)
-    times, xs, ys, zs = candidate_intercept_points(state, action, config)
+    if candidates is None:
+        candidates = candidate_intercept_points(state, action, config, result=result)
+    times, xs, ys, zs = candidates
 
     feasible: list[int] = []
     for index, (t, x_pos, y_pos, z_pos) in enumerate(zip(times, xs, ys, zs)):
@@ -515,6 +549,36 @@ def feasible_intercept_indices(
         ):
             feasible.append(index)
     return feasible
+
+
+def prepare_shot(
+    state: StageState,
+    action: ShotAction,
+    config: SimulationConfig,
+) -> PreparedShot:
+    validated, active = validate_and_clip_shot_action_with_result(state, action, config)
+    candidates = candidate_intercept_points(
+        state,
+        validated.applied,
+        config,
+        result=active,
+    )
+    feasible_indices = feasible_intercept_indices(
+        state,
+        validated.applied,
+        config,
+        candidates=candidates,
+    )
+    candidate_times, candidate_xs, candidate_ys, candidate_zs = candidates
+    return PreparedShot(
+        validated_action=validated,
+        trajectory=active,
+        candidate_times=candidate_times,
+        candidate_xs=candidate_xs,
+        candidate_ys=candidate_ys,
+        candidate_zs=candidate_zs,
+        feasible_indices=feasible_indices,
+    )
 
 
 def sample_trajectory(
@@ -549,15 +613,22 @@ def step_stage(
     action: ShotAction,
     intercept_index: int | None,
     config: SimulationConfig,
+    *,
+    enable_reaction_miss: bool = True,
+    prepared_shot: PreparedShot | None = None,
 ) -> StageRecord:
     if state.rally_done:
         raise ValueError("Cannot step a finished rally.")
 
-    validated = validate_and_clip_shot_action(state, action, config)
+    prepared = prepared_shot or prepare_shot(state, action, config)
+    validated = prepared.validated_action
     receiver_side = opponent_side(state.current_hitter)
-    active = trajectory_result(state, validated.applied, config)
-    candidate_times, candidate_xs, candidate_ys, candidate_zs = candidate_intercept_points(state, validated.applied, config)
-    feasible_indices = feasible_intercept_indices(state, validated.applied, config)
+    active = prepared.trajectory
+    candidate_times = prepared.candidate_times
+    candidate_xs = prepared.candidate_xs
+    candidate_ys = prepared.candidate_ys
+    candidate_zs = prepared.candidate_zs
+    feasible_indices = list(prepared.feasible_indices)
 
     chosen_time = None
     intercept_point = None
@@ -665,7 +736,7 @@ def step_stage(
     y_int = float(candidate_ys[intercept_index])
     z_int = float(candidate_zs[intercept_index])
     miss_probability = reaction_miss_probability(t_int, config)
-    if miss_probability > 0.0 and float(np.random.random()) < miss_probability:
+    if enable_reaction_miss and miss_probability > 0.0 and float(np.random.random()) < miss_probability:
         notes.append(
             "Receiver missed a fast shuttle "
             f"(flight={t_int:.2f}s, miss_probability={miss_probability:.2f})."

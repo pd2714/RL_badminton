@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vertical-drag-coefficient", type=float, default=0.16)
     parser.add_argument("--shuttle-speed-min", type=float, default=0.1)
     parser.add_argument("--shuttle-speed-max", type=float, default=SimulationConfig().action.vy_max_forward)
+    parser.add_argument("--conditional-recovery-grid", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--intercept-count", type=int, default=20)
     parser.add_argument("--reaction-miss-fast-threshold", type=float, default=SimulationConfig().action.reaction_miss_fast_threshold)
     parser.add_argument("--reaction-miss-fast-probability", type=float, default=SimulationConfig().action.reaction_miss_fast_probability)
@@ -106,6 +107,7 @@ def build_sim_config(args: argparse.Namespace) -> SimulationConfig:
             vertical_drag_coefficient=vertical_drag,
             vy_min_forward=args.shuttle_speed_min,
             vy_max_forward=args.shuttle_speed_max,
+            conditional_recovery_grid=args.conditional_recovery_grid,
             intercept_count=args.intercept_count,
             reaction_miss_fast_threshold=args.reaction_miss_fast_threshold,
             reaction_miss_fast_probability=args.reaction_miss_fast_probability,
@@ -135,6 +137,8 @@ def build_env(args: argparse.Namespace, *, include_records_in_info: bool = True)
             include_records_in_info=include_records_in_info,
             policy_type=args.policy_type,
             tactic_runtime=tactic_runtime,
+            recovery_counterfactual_other_sample_count=0,
+            recovery_counterfactual_expected_response_target=False,
         ),
         discrete_action_config=DiscreteActionConfig(
             phi_bins=args.phi_bins,
@@ -271,6 +275,8 @@ def main() -> None:
             label_name="mirror_self",
         ),
         include_records_in_info=False,
+        recovery_counterfactual_other_sample_count=0,
+        recovery_counterfactual_expected_response_target=False,
     )
     mirror_self_summary, _ = evaluate_selector("current_vs_mirror_self", model_selector, mirror_self_env, args.episodes, args.seed + 3_500)
     summaries.append(mirror_self_summary)
@@ -319,6 +325,8 @@ def main() -> None:
                     ),
                 ),
                 include_records_in_info=False,
+                recovery_counterfactual_other_sample_count=0,
+                recovery_counterfactual_expected_response_target=False,
             )
             checkpoint_summary, _ = evaluate_selector("current_vs_newest_checkpoint", model_selector, checkpoint_env, args.episodes, args.seed + 4_000)
             summaries.append(checkpoint_summary)

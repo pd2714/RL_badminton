@@ -61,13 +61,17 @@ def _load_config(run_dir: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _config_value(config: dict[str, Any], key: str, default: Any) -> Any:
-    value = config.get(key)
-    return default if value is None else value
+def _config_value(config: dict[str, Any], key: str, default: Any, *aliases: str) -> Any:
+    for candidate in (key, *aliases):
+        value = config.get(candidate)
+        if value is not None:
+            return value
+    return default
 
 
 def build_sim_config(config: dict[str, Any]) -> SimulationConfig:
     defaults = SimulationConfig()
+    conditional_recovery_default = True if "conditional_recovery_grid" not in config else defaults.action.conditional_recovery_grid
     return SimulationConfig(
         court=CourtConfig(mode=str(_config_value(config, "court_mode", defaults.court.mode))),
         player=PlayerConfig(
@@ -92,6 +96,9 @@ def build_sim_config(config: dict[str, Any]) -> SimulationConfig:
             recovery_x_margin=float(_config_value(config, "recovery_x_margin", defaults.action.recovery_x_margin)),
             recovery_net_margin=float(_config_value(config, "recovery_net_margin", defaults.action.recovery_net_margin)),
             recovery_back_margin=float(_config_value(config, "recovery_back_margin", defaults.action.recovery_back_margin)),
+            conditional_recovery_grid=bool(
+                _config_value(config, "conditional_recovery_grid", conditional_recovery_default)
+            ),
             intercept_count=int(_config_value(config, "intercept_count", defaults.action.intercept_count)),
             reaction_miss_fast_threshold=float(
                 _config_value(config, "reaction_miss_fast_threshold", defaults.action.reaction_miss_fast_threshold)
@@ -123,9 +130,9 @@ def build_sim_config(config: dict[str, Any]) -> SimulationConfig:
 def build_discrete_action_config(config: dict[str, Any]) -> DiscreteActionConfig:
     defaults = DiscreteActionConfig()
     return DiscreteActionConfig(
-        phi_bins=int(_config_value(config, "phi_bins", "vx_bins", defaults.phi_bins)),
-        theta_bins=int(_config_value(config, "theta_bins", "vy_bins", defaults.theta_bins)),
-        speed_bins=int(_config_value(config, "speed_bins", "vz_bins", defaults.speed_bins)),
+        phi_bins=int(_config_value(config, "phi_bins", defaults.phi_bins, "vx_bins")),
+        theta_bins=int(_config_value(config, "theta_bins", defaults.theta_bins, "vy_bins")),
+        speed_bins=int(_config_value(config, "speed_bins", defaults.speed_bins, "vz_bins")),
         x_rec_bins=int(_config_value(config, "x_rec_bins", defaults.x_rec_bins)),
         y_rec_bins=int(_config_value(config, "y_rec_bins", defaults.y_rec_bins)),
     )
@@ -189,6 +196,8 @@ def build_checkpoint_env(
         discrete_action_config=discrete_action_config,
         opponent=opponent_policy,
         include_records_in_info=include_records_in_info,
+        recovery_counterfactual_other_sample_count=0,
+        recovery_counterfactual_expected_response_target=False,
     )
 
 

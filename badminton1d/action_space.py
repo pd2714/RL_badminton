@@ -9,8 +9,9 @@ from gymnasium import spaces
 
 from badminton1d.config import SimulationConfig
 from badminton1d.dynamics import (
+    PreparedShot,
     landing_position,
-    validate_and_clip_shot_action,
+    prepare_shot,
     validate_and_clip_shot_action_with_result,
     vy_bounds_for_hitter,
 )
@@ -25,7 +26,7 @@ from badminton1d.shot_generators import (
     TacticRuntimeConfig,
 )
 from badminton1d.shot_generators.tactic_lookup_common import default_recovery_target, validate_policy_type
-from badminton1d.state import ShotAction, Side, StageState
+from badminton1d.state import ShotAction, Side, StageState, ValidatedShotAction
 from badminton1d.utils import (
     canonicalize_state_for_agent,
     opponent_side,
@@ -51,8 +52,10 @@ CONDITIONAL_VELOCITY_POLICY_TYPES = {
 
 VELOCITY_ORIENTED_THETA_HIGH_DEG = 65.0
 VELOCITY_ORIENTED_SERVICE_PHI_BOUNDARY_TRIM_DEG = 5.0
-VELOCITY_ORIENTED_MIDRALLY_LEFT_COURT_PHI_TRIM_DEG = 5.0
-VELOCITY_ORIENTED_MIDRALLY_RIGHT_COURT_PHI_TRIM_DEG = 10.0
+VELOCITY_ORIENTED_MIDRALLY_NEAR_BOUNDARY_PHI_TRIM_DEG = 5.0
+VELOCITY_ORIENTED_MIDRALLY_FAR_BOUNDARY_PHI_TRIM_DEG = 10.0
+VELOCITY_ORIENTED_MIDRALLY_LEFT_COURT_PHI_TRIM_DEG = VELOCITY_ORIENTED_MIDRALLY_NEAR_BOUNDARY_PHI_TRIM_DEG
+VELOCITY_ORIENTED_MIDRALLY_RIGHT_COURT_PHI_TRIM_DEG = VELOCITY_ORIENTED_MIDRALLY_FAR_BOUNDARY_PHI_TRIM_DEG
 VELOCITY_ORIENTED_PHI_CLUSTER_POWER = 2.2
 VELOCITY_ORIENTED_SPEED_UPPER = 100.0
 VELOCITY_ORIENTED_SPEED_RANGE_SCAN_COUNT = 17
@@ -131,6 +134,19 @@ class HitterActionDecode:
 class ProjectedHitterAction:
     shot_action: ShotAction
     projected: bool
+    prepared_shot: PreparedShot
+
+
+def _prepared_shot_for_projected_action(prepared: PreparedShot) -> PreparedShot:
+    applied = prepared.validated_action.applied
+    return replace(
+        prepared,
+        validated_action=ValidatedShotAction(
+            requested=applied,
+            applied=applied,
+            projected=False,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -220,7 +236,13 @@ class VelocityOrientedActionMapper:
             v_z = self._linspace_value(self.config.action.vz_min, self.config.action.vz_max, speed_index, self.discrete_config.speed_bins)
             phi, theta, speed = self._shot_context_from_velocity(v_x, v_y, v_z, state.current_hitter)
 
-        landing_x, landing_y = landing_position(state, ShotAction(v_x=v_x, v_y=v_y, v_z=v_z, x_rec=0.0, y_rec=0.0), self.config)
+        landing_x = landing_y = 0.0
+        if self.config.action.conditional_recovery_grid:
+            landing_x, landing_y = landing_position(
+                state,
+                ShotAction(v_x=v_x, v_y=v_y, v_z=v_z, x_rec=0.0, y_rec=0.0),
+                self.config,
+            )
         x_rec_grid, y_rec_grid = self._recovery_grid_for_shot_context(
             state,
             phi=float(phi),
@@ -318,12 +340,18 @@ class VelocityOrientedActionMapper:
             x_rec=float(np.clip(shot_action.x_rec, rec_x_low, rec_x_high)),
             y_rec=float(np.clip(shot_action.y_rec, rec_y_low, rec_y_high)),
         )
-        validated = validate_and_clip_shot_action(state, clipped, self.config)
-        if not self._is_legal_serve_action(state, validated.applied):
+        prepared = prepare_shot(state, clipped, self.config)
+        validated = prepared.validated_action
+        if state.stage_index == 0 and not self._is_legal_serve_landing(
+            state,
+            prepared.trajectory.landing_x,
+            prepared.trajectory.landing_y,
+        ):
             raise ValueError("Decoded hitter action is not legal for the current serve target.")
         return ProjectedHitterAction(
             shot_action=validated.applied,
             projected=not self._actions_close(shot_action, validated.applied),
+            prepared_shot=_prepared_shot_for_projected_action(prepared),
         )
 
     def vx_grid(self) -> np.ndarray:
@@ -513,12 +541,8 @@ class VelocityOrientedActionMapper:
             phi_low, phi_high = sorted((left_angle, right_angle))
         if state.stage_index == 0:
             lower_trim = upper_trim = float(np.deg2rad(VELOCITY_ORIENTED_SERVICE_PHI_BOUNDARY_TRIM_DEG))
-        elif state.current_hitter == "left":
-            lower_trim = float(np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_RIGHT_COURT_PHI_TRIM_DEG))
-            upper_trim = float(np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_LEFT_COURT_PHI_TRIM_DEG))
         else:
-            lower_trim = float(np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_LEFT_COURT_PHI_TRIM_DEG))
-            upper_trim = float(np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_RIGHT_COURT_PHI_TRIM_DEG))
+            lower_trim, upper_trim = self._midrally_phi_boundary_trims(state, left_angle, right_angle)
         if phi_high - phi_low > lower_trim + upper_trim:
             phi_low += lower_trim
             phi_high -= upper_trim
@@ -530,6 +554,25 @@ class VelocityOrientedActionMapper:
         grid = self._clustered_angle_grid(phi_low, phi_high, forward_phi, self._effective_phi_bins)
         self._phi_grid_cache[cache_key] = grid
         return grid
+
+    def _midrally_phi_boundary_trims(
+        self,
+        state: StageState,
+        left_boundary_angle: float,
+        right_boundary_angle: float,
+    ) -> tuple[float, float]:
+        near_trim = float(np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_NEAR_BOUNDARY_PHI_TRIM_DEG))
+        far_trim = float(np.deg2rad(VELOCITY_ORIENTED_MIDRALLY_FAR_BOUNDARY_PHI_TRIM_DEG))
+        if state.x0 < 0.0:
+            left_trim, right_trim = near_trim, far_trim
+        elif state.x0 > 0.0:
+            left_trim, right_trim = far_trim, near_trim
+        else:
+            left_trim = right_trim = near_trim
+
+        if left_boundary_angle <= right_boundary_angle:
+            return left_trim, right_trim
+        return right_trim, left_trim
 
     def _theta_grid_for_phi(self, state: StageState, phi: float) -> np.ndarray:
         cache_key = (*self._angle_grid_state_key(state), float(phi), self.discrete_config.theta_bins)
@@ -1113,7 +1156,9 @@ class VelocityOrientedActionMapper:
             shot_action.v_z,
             state.current_hitter,
         )
-        landing_x, landing_y = landing_position(state, shot_action, self.config)
+        landing_x = landing_y = 0.0
+        if self.config.action.conditional_recovery_grid:
+            landing_x, landing_y = landing_position(state, shot_action, self.config)
         return self._recovery_grid_for_shot_context(
             state,
             phi=phi,
@@ -1134,6 +1179,14 @@ class VelocityOrientedActionMapper:
         landing_y: float,
     ) -> tuple[np.ndarray, np.ndarray]:
         (rec_x_low, rec_x_high), (rec_y_low, rec_y_high) = recovery_bounds(state.current_hitter, self.config)
+        if not self.config.action.conditional_recovery_grid:
+            if self.config.court.lateral_motion_enabled:
+                x_grid = self._recovery_axis_grid(rec_x_low, rec_x_high, self._effective_x_rec_bins)
+            else:
+                x_grid = np.asarray([0.0], dtype=float)
+            y_grid = self._recovery_axis_grid(rec_y_low, rec_y_high, self.discrete_config.y_rec_bins)
+            return x_grid, y_grid
+
         x_anchor, y_anchor = self._conditional_recovery_anchor(
             state,
             phi=phi,
@@ -1346,14 +1399,23 @@ class TacticOrientedActionMapper:
 
     def project_hitter_action(self, state: StageState, shot_action: ShotAction) -> ProjectedHitterAction:
         try:
-            validated = validate_and_clip_shot_action(state, shot_action, self.config)
-            return ProjectedHitterAction(shot_action=validated.applied, projected=not self._actions_close(shot_action, validated.applied))
+            prepared = prepare_shot(state, shot_action, self.config)
+            validated = prepared.validated_action
+            return ProjectedHitterAction(
+                shot_action=validated.applied,
+                projected=not self._actions_close(shot_action, validated.applied),
+                prepared_shot=_prepared_shot_for_projected_action(prepared),
+            )
         except ValueError:
             from badminton1d.agents import SafeHitter
 
             safe_action = SafeHitter().choose_action(state, self.config)
-            validated = validate_and_clip_shot_action(state, safe_action, self.config)
-            return ProjectedHitterAction(shot_action=validated.applied, projected=True)
+            prepared = prepare_shot(state, safe_action, self.config)
+            return ProjectedHitterAction(
+                shot_action=prepared.validated_action.applied,
+                projected=True,
+                prepared_shot=_prepared_shot_for_projected_action(prepared),
+            )
 
     def legal_serve_hitter_mask(self, state: StageState) -> np.ndarray:
         if state.stage_index != 0:

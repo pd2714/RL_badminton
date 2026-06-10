@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 from badminton1d.action_space import DiscreteActionConfig, DiscreteActionMapper
-from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import landing_position
+from badminton1d.config import ActionConfig, SimulationConfig
+from badminton1d.dynamics import feasible_intercept_indices, landing_position, prepare_shot, simulate_trajectory
 from badminton1d.obs import ObservationEncoder
 from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig
 from badminton1d.state import ShotAction, StageState
@@ -21,6 +22,83 @@ class RLEnvTests(unittest.TestCase):
         self.assertEqual(obs.shape[0], ObservationEncoder(config).size)
         self.assertEqual(env.action_mapper.policy_type, "velocity_oriented")
         self.assertEqual(env.action_space.n, env.action_mapper.action_count)
+
+    def test_observation_includes_reaction_miss_risk_features(self) -> None:
+        config = SimulationConfig()
+        encoder = ObservationEncoder(config)
+        feature_names = encoder.feature_names()
+        mean_miss_index = feature_names.index("mean_feasible_reaction_miss_probability")
+        safe_fraction_index = feature_names.index("zero_miss_feasible_fraction")
+        state = StageState(
+            x_left=0.0,
+            y_left=-1.2,
+            x_right=0.0,
+            y_right=1.2,
+            current_hitter="left",
+            x0=0.0,
+            y0=-1.2,
+            z0=1.7,
+            stage_index=1,
+        )
+        fast_action = ShotAction(v_x=0.0, v_y=6.5, v_z=2.0, x_rec=0.0, y_rec=-1.0)
+        slow_action = ShotAction(v_x=0.0, v_y=1.5, v_z=4.0, x_rec=0.0, y_rec=-2.5)
+        fast_feasible = feasible_intercept_indices(state, fast_action, config)
+        slow_feasible = feasible_intercept_indices(state, slow_action, config)
+
+        self.assertTrue(fast_feasible)
+        self.assertTrue(slow_feasible)
+
+        fast_obs = encoder.encode(
+            state=state,
+            agent_side="right",
+            role="receiver",
+            server_side="left",
+            pending_action=fast_action,
+            feasible_indices=fast_feasible,
+        )
+        slow_obs = encoder.encode(
+            state=state,
+            agent_side="right",
+            role="receiver",
+            server_side="left",
+            pending_action=slow_action,
+            feasible_indices=slow_feasible,
+        )
+
+        self.assertGreater(float(fast_obs[mean_miss_index]), float(slow_obs[mean_miss_index]))
+        self.assertLess(float(fast_obs[safe_fraction_index]), float(slow_obs[safe_fraction_index]))
+
+    def test_receiver_observation_reuses_prepared_drag_simulation(self) -> None:
+        config = SimulationConfig(action=ActionConfig(trajectory_mode="drag_square"))
+        encoder = ObservationEncoder(config)
+        state = StageState(
+            x_left=-0.5,
+            y_left=-2.5,
+            x_right=0.5,
+            y_right=2.5,
+            current_hitter="left",
+            x0=-0.5,
+            y0=-2.5,
+            z0=1.7,
+            stage_index=1,
+        )
+        action = ShotAction(v_x=0.9, v_y=5.8, v_z=5.0, x_rec=0.0, y_rec=-1.8)
+        prepared = prepare_shot(state, action, config)
+        kwargs = {
+            "state": state,
+            "agent_side": "right",
+            "role": "receiver",
+            "server_side": "left",
+            "pending_action": action,
+            "feasible_indices": list(prepared.feasible_indices),
+        }
+        direct = encoder.encode(**kwargs)
+
+        with patch("badminton1d.dynamics.simulate_trajectory", wraps=simulate_trajectory) as mocked_simulate:
+            reused = encoder.encode(**kwargs, prepared_shot=prepared)
+
+        self.assertEqual(mocked_simulate.call_count, 0)
+        self.assertTrue(np.allclose(reused, direct))
 
     def test_continuous_hitter_decode_uses_court_recovery_limits(self) -> None:
         config = SimulationConfig()

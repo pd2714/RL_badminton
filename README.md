@@ -260,10 +260,10 @@ Current PPO defaults in `scripts/train_ppo.py` are tuned around the drag-square 
 
 - `trajectory_mode=drag_square`
 - `reaction_time=0.15`
-- `player_speed=4.0`
+- `player_speed=5.0`
 - `movement_model=accelerated`
-- `player_acceleration=6.5`
-- `racket_length=1.3`
+- `player_acceleration=8.0`
+- `racket_length=1.6`
 - `max_hitting_height=2.6`
 - `intercept_count=20`
 - `mirror_match_fraction=0.25`
@@ -307,7 +307,7 @@ The self-play trainer in `scripts/train_selfplay.py` now defaults to:
 - saving checkpoint-pool snapshots every `2000` timesteps
 - evaluating `current_vs_newest_checkpoint` every `5000` timesteps by default
 - keeping mirror-side training active for `25%` of episodes unless overridden with `--mirror-match-fraction`
-- using `drag_square`, `reaction_time=0.15`, `player_speed=4.0`, `movement_model=accelerated`, `player_acceleration=6.5`, `racket_length=1.3`, `max_hitting_height=2.6`, and `intercept_count=20`
+- using `drag_square`, `reaction_time=0.15`, `player_speed=5.0`, `movement_model=accelerated`, `player_acceleration=8.0`, `racket_length=1.6`, `max_hitting_height=2.6`, and `intercept_count=20`
 - capping rallies at `120` stages with `max_rally_penalty=1.0`
 - using loop-penalty shaping (`0.1`, window `4`), with pressure and defensive-shot rewards off by default
 - leaving `stage_penalty` and `stall_penalty` off by default unless explicitly enabled

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import step_stage
+from badminton1d.dynamics import PreparedShot, step_stage
 from badminton1d.state import ShotAction, StageRecord, StageState
 from badminton1d.utils import default_player_position
 
@@ -34,7 +34,19 @@ class Badminton1DEnv:
         self.state = state or default_initial_state(self.config)
         return self.state
 
-    def step(self, action: ShotAction, intercept_index: int | None) -> StageRecord:
-        record = step_stage(self.state, action, intercept_index, self.config)
+    def step(
+        self,
+        action: ShotAction,
+        intercept_index: int | None,
+        *,
+        prepared_shot: PreparedShot | None = None,
+    ) -> StageRecord:
+        record = step_stage(
+            self.state,
+            action,
+            intercept_index,
+            self.config,
+            prepared_shot=prepared_shot,
+        )
         self.state = record.next_state
         return record

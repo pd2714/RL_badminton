@@ -11,7 +11,7 @@ from badminton1d.pressure import ShotPressureWeights, shot_pressure_from_candida
 class ShotPressureTests(unittest.TestCase):
     def test_required_speed_component_increases_with_harder_chase(self) -> None:
         config = SimulationConfig(player=PlayerConfig(v_max=4.0, r_reach=0.5))
-        weights = ShotPressureWeights(required_speed=1.0, intercept_scarcity=0.0, low_contact=0.0)
+        weights = ShotPressureWeights(required_speed=1.0, intercept_scarcity=0.0, low_contact=0.0, reaction_miss=0.0)
         easy = shot_pressure_from_candidates(
             receiver_side="right",
             receiver_start=(0.0, 3.0),
@@ -44,7 +44,7 @@ class ShotPressureTests(unittest.TestCase):
 
     def test_intercept_scarcity_component_increases_when_options_shrink(self) -> None:
         config = SimulationConfig()
-        weights = ShotPressureWeights(required_speed=0.0, intercept_scarcity=1.0, low_contact=0.0)
+        weights = ShotPressureWeights(required_speed=0.0, intercept_scarcity=1.0, low_contact=0.0, reaction_miss=0.0)
         common_kwargs = {
             "receiver_side": "right",
             "receiver_start": (0.0, 3.0),
@@ -66,7 +66,7 @@ class ShotPressureTests(unittest.TestCase):
 
     def test_low_contact_component_uses_best_feasible_height(self) -> None:
         config = SimulationConfig()
-        weights = ShotPressureWeights(required_speed=0.0, intercept_scarcity=0.0, low_contact=1.0)
+        weights = ShotPressureWeights(required_speed=0.0, intercept_scarcity=0.0, low_contact=1.0, reaction_miss=0.0)
         low = shot_pressure_from_candidates(
             receiver_side="right",
             receiver_start=(0.0, 3.0),
@@ -96,6 +96,60 @@ class ShotPressureTests(unittest.TestCase):
 
         self.assertGreater(low.low_contact_score, high.low_contact_score)
         self.assertGreater(low.pressure, high.pressure)
+
+    def test_reaction_miss_component_uses_expected_feasible_intercept_risk(self) -> None:
+        config = SimulationConfig()
+        weights = ShotPressureWeights(
+            required_speed=0.0,
+            intercept_scarcity=0.0,
+            low_contact=0.0,
+            reaction_miss=1.0,
+        )
+        common_kwargs = {
+            "receiver_side": "right",
+            "receiver_start": (0.0, 3.0),
+            "receiver_velocity": (0.0, 0.0),
+            "receiver_reaction_time": 0.0,
+            "candidate_times": np.asarray([0.05, 0.30, 0.60]),
+            "candidate_xs": np.asarray([0.0, 0.0, 0.0]),
+            "candidate_ys": np.asarray([3.0, 3.2, 3.4]),
+            "candidate_zs": np.asarray([1.4, 1.5, 1.6]),
+            "config": config,
+            "weights": weights,
+        }
+
+        only_fast = shot_pressure_from_candidates(feasible_indices=[0], **common_kwargs)
+        has_safe_late_option = shot_pressure_from_candidates(feasible_indices=[0, 2], **common_kwargs)
+
+        self.assertAlmostEqual(only_fast.reaction_miss_score, 0.8)
+        self.assertAlmostEqual(has_safe_late_option.reaction_miss_score, 0.4)
+        self.assertGreater(only_fast.pressure, has_safe_late_option.pressure)
+
+    def test_reaction_miss_component_is_maximal_without_feasible_intercepts(self) -> None:
+        config = SimulationConfig()
+        weights = ShotPressureWeights(
+            required_speed=0.0,
+            intercept_scarcity=0.0,
+            low_contact=0.0,
+            reaction_miss=1.0,
+        )
+
+        pressure = shot_pressure_from_candidates(
+            receiver_side="right",
+            receiver_start=(0.0, 3.0),
+            receiver_velocity=(0.0, 0.0),
+            receiver_reaction_time=0.0,
+            candidate_times=np.asarray([0.60]),
+            candidate_xs=np.asarray([0.0]),
+            candidate_ys=np.asarray([3.4]),
+            candidate_zs=np.asarray([1.6]),
+            feasible_indices=[],
+            config=config,
+            weights=weights,
+        )
+
+        self.assertAlmostEqual(pressure.reaction_miss_score, 1.0)
+        self.assertAlmostEqual(pressure.pressure, 1.0)
 
 
 if __name__ == "__main__":
