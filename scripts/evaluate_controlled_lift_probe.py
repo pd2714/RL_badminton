@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 import math
 import sys
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +44,15 @@ from badminton1d.obs import ObservationConfig, ObservationEncoder
 from badminton1d.pressure import shot_pressure_from_record
 from badminton1d.shot_generators import name_velocity_shot
 from badminton1d.state import ShotAction, Side, StageState
-from badminton1d.utils import default_player_position, ensure_directory, opponent_side, side_center_y, side_y_bounds, x_bounds
+from badminton1d.utils import (
+    default_player_position,
+    ensure_directory,
+    opponent_side,
+    recovery_bounds,
+    side_center_y,
+    side_y_bounds,
+    x_bounds,
+)
 
 
 @dataclass(frozen=True)
@@ -107,6 +116,20 @@ def parse_args() -> argparse.Namespace:
         help="Stage index assigned to direct contact-grid probe states.",
     )
     parser.add_argument(
+        "--opponent-recovery-grid-3x3",
+        action="store_true",
+        help=(
+            "For contact-grid probes, expand each hitter contact state over a 3x3 opponent-position "
+            "grid on the opponent court."
+        ),
+    )
+    parser.add_argument(
+        "--opponent-grid-side",
+        choices=("left", "right"),
+        default=None,
+        help="Court side for the opponent-position grid. Defaults to the opponent of train_side.",
+    )
+    parser.add_argument(
         "--train-side",
         choices=("left", "right"),
         default=None,
@@ -124,7 +147,14 @@ def main() -> None:
     if args.anchor_step_interval is not None and args.anchor_step_interval <= 0:
         raise ValueError("--anchor-step-interval must be positive")
 
-    probe_name = args.probe_name or ("controlled_lift" if args.probe_preset == "controlled-lift" else "controlled_contact_grid")
+    if args.probe_name:
+        probe_name = args.probe_name
+    elif args.probe_preset == "controlled-lift":
+        probe_name = "controlled_lift"
+    elif args.opponent_recovery_grid_3x3:
+        probe_name = "controlled_contact_grid_opponent_grid3x3"
+    else:
+        probe_name = "controlled_contact_grid"
     output_dir = args.output_dir or (args.run_dir / "anchor_metric_eval" / f"{probe_name}_probe")
     ensure_directory(output_dir)
 
@@ -306,12 +336,20 @@ def _build_probe_scenarios(
             )
         ]
     if args.probe_preset == "contact-grid":
-        return _build_contact_grid_scenarios(
+        scenarios = _build_contact_grid_scenarios(
             train_side=train_side,
             config=sim_config,
             reaction_time=reaction_time,
             stage_index=int(args.contact_grid_stage_index),
         )
+        if args.opponent_recovery_grid_3x3:
+            opponent_grid_side: Side = args.opponent_grid_side or opponent_side(train_side)  # type: ignore[assignment]
+            scenarios = _expand_scenarios_over_opponent_recovery_grid(
+                scenarios,
+                opponent_grid_side=opponent_grid_side,
+                config=sim_config,
+            )
+        return scenarios
     raise ValueError(f"Unsupported probe preset: {args.probe_preset}")
 
 
@@ -386,6 +424,74 @@ def _contact_y_positions(side: Side, config: Any) -> tuple[tuple[str, float], ..
         ("midcourt", float(mid)),
         ("frontcourt", float(front)),
     )
+
+
+def _expand_scenarios_over_opponent_recovery_grid(
+    scenarios: list[ProbeScenario],
+    *,
+    opponent_grid_side: Side,
+    config: Any,
+) -> list[ProbeScenario]:
+    x_cells, y_cells = _opponent_recovery_grid_cells(opponent_grid_side, config)
+    expanded: list[ProbeScenario] = []
+    for scenario in scenarios:
+        base_probe_id = scenario.probe_id
+        for y_label, y in y_cells:
+            for x_label, x in x_cells:
+                cell_id = f"opponent_{y_label}_{x_label}"
+                probe_id = f"{base_probe_id}__{cell_id}"
+                if opponent_grid_side == "left":
+                    response_state = replace(scenario.response_state, x_left=float(x), y_left=float(y))
+                else:
+                    response_state = replace(scenario.response_state, x_right=float(x), y_right=float(y))
+                metadata = copy.deepcopy(scenario.metadata)
+                metadata.update(
+                    {
+                        "probe_id": probe_id,
+                        "contact_probe_id": base_probe_id,
+                        "opponent_grid_side": opponent_grid_side,
+                        "opponent_cell_id": cell_id,
+                        "opponent_cell": {"x_region": x_label, "y_region": y_label},
+                        "opponent_position": {"x": float(x), "y": float(y)},
+                        "response_state": asdict(response_state),
+                    }
+                )
+                expanded.append(
+                    ProbeScenario(
+                        probe_id=probe_id,
+                        title=f"{scenario.title} | {cell_id.replace('_', ' ')}",
+                        response_state=response_state,
+                        metadata=metadata,
+                    )
+                )
+    return expanded
+
+
+def _opponent_recovery_grid_cells(
+    side: Side,
+    config: Any,
+) -> tuple[tuple[tuple[str, float], ...], tuple[tuple[str, float], ...]]:
+    (x_low, x_high), (y_low, y_high) = recovery_bounds(side, config)
+    x_grid = _axis_grid(float(x_low), float(x_high), 5, lateral_motion_enabled=bool(config.court.lateral_motion_enabled))
+    y_grid = _axis_grid(float(y_low), float(y_high), 5, lateral_motion_enabled=True)
+    selected = (0, 2, 4)
+    x_labels = ("left", "middle", "right")
+    y_labels = ("backcourt", "midcourt", "frontcourt") if side == "left" else ("frontcourt", "midcourt", "backcourt")
+    x_cells = tuple((label, float(x_grid[index])) for label, index in zip(x_labels, selected))
+    y_cells = tuple((label, float(y_grid[index])) for label, index in zip(y_labels, selected))
+    return x_cells, y_cells
+
+
+def _axis_grid(
+    low: float,
+    high: float,
+    bins: int,
+    *,
+    lateral_motion_enabled: bool,
+) -> np.ndarray:
+    if not lateral_motion_enabled:
+        return np.full(bins, 0.5 * (low + high), dtype=float)
+    return np.linspace(low, high, bins, dtype=float)
 
 
 def _direct_contact_state(
@@ -780,7 +886,7 @@ def _scenario_row_fields(scenario: ProbeScenario) -> dict[str, Any]:
         "probe_id": scenario.probe_id,
         "probe_title": scenario.title,
     }
-    for key in ("preset", "x_region", "y_region", "z_level"):
+    for key in ("preset", "x_region", "y_region", "z_level", "contact_probe_id", "opponent_grid_side", "opponent_cell_id"):
         if key in scenario.metadata:
             fields[key] = scenario.metadata[key]
     contact = scenario.metadata.get("contact_point")
@@ -788,6 +894,10 @@ def _scenario_row_fields(scenario: ProbeScenario) -> dict[str, Any]:
         fields["contact_x"] = float(contact["x"])
         fields["contact_y"] = float(contact["y"])
         fields["contact_z"] = float(contact["z"])
+    opponent = scenario.metadata.get("opponent_position")
+    if isinstance(opponent, dict):
+        fields["opponent_x"] = float(opponent["x"])
+        fields["opponent_y"] = float(opponent["y"])
     return fields
 
 

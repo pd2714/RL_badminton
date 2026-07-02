@@ -1,0 +1,12 @@
+{
+  "coordinate_system": "ShuttleArena-centered meters, from ShuttleSet22 homography projection",
+  "drop_flawed_rallies": true,
+  "drop_unknown_shots": true,
+  "events": 43994,
+  "output": "/Users/peizeding/Desktop/Projects/RL_badminton/data/human/shuttleset22_events.csv",
+  "rallies": 4055,
+  "recovery_proxy": "next stroke's opponent_location_x/y, i.e. previous hitter location while receiving the reply",
+  "set_files": 140,
+  "source": "ShuttleSet22",
+  "source_root": "/Users/peizeding/Desktop/Projects/RL_badminton/external/CoachAI-Projects/CoachAI-Challenge-IJCAI2023/ShuttleSet22/set"
+}

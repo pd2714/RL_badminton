@@ -1,0 +1,28 @@
+readiness pure_cfa seed 17: step=6002000 target=6000000
+Evaluation started for seed 17 at Wed Jul  1 20:49:40 EDT 2026
+Loaded compatible base policy parameters from outputs/rl/velocity_2d_heuristic_1k_fast/final_model.zip (8 exact tensors, 2 input-prefix tensors).
+created compatible 0M checkpoint: outputs/rl/ginsburg_20260622/eval/seed_17/panel_6a_learned_centered_recovery_200r/source_checkpoints/compatible_zero_model.zip
+learned_0m vs learned_2m: wr=0.170 (200 rallies)
+learned_0m vs centered_2m: wr=0.000 (200 rallies)
+learned_0m vs learned_4m: wr=0.080 (200 rallies)
+learned_0m vs centered_4m: wr=0.005 (200 rallies)
+learned_0m vs learned_6m: wr=0.080 (200 rallies)
+learned_0m vs centered_6m: wr=0.030 (200 rallies)
+centered_0m vs learned_2m: wr=0.165 (200 rallies)
+centered_0m vs centered_2m: wr=0.015 (200 rallies)
+centered_0m vs learned_4m: wr=0.080 (200 rallies)
+centered_0m vs centered_4m: wr=0.055 (200 rallies)
+centered_0m vs learned_6m: wr=0.125 (200 rallies)
+centered_0m vs centered_6m: wr=0.060 (200 rallies)
+learned_1m vs learned_2m: wr=0.440 (200 rallies)
+learned_1m vs centered_2m: wr=0.880 (200 rallies)
+learned_1m vs learned_4m: wr=0.445 (200 rallies)
+learned_1m vs centered_4m: wr=0.835 (200 rallies)
+learned_1m vs learned_6m: wr=0.210 (200 rallies)
+learned_1m vs centered_6m: wr=0.805 (200 rallies)
+centered_1m vs learned_2m: wr=0.250 (200 rallies)
+centered_1m vs centered_2m: wr=0.440 (200 rallies)
+centered_1m vs learned_4m: wr=0.115 (200 rallies)
+centered_1m vs centered_4m: wr=0.325 (200 rallies)
+centered_1m vs learned_6m: wr=0.035 (200 rallies)
+centered_1m vs centered_6m: wr=0.445 (200 rallies)

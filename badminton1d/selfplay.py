@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.save_util import load_from_zip_file, recursive_setattr
+from stable_baselines3.common.vec_env.patch_gym import _convert_space
 
 from badminton1d.action_space import DiscreteActionConfig, DiscreteActionMapper
 from badminton1d.config import SimulationConfig
@@ -41,6 +43,10 @@ from badminton1d.utils import ensure_directory
 from badminton1d.video import TrainingProgressSample, export_rally_video, export_training_progress_video
 
 _STEP_PATTERN = re.compile(r"(\d+)")
+_PREFIX_COMPATIBLE_KEYS = {
+    "mlp_extractor.policy_net.0.weight",
+    "mlp_extractor.value_net.0.weight",
+}
 
 
 def replace_with_existing_file(source_path: Path, target_path: Path) -> None:
@@ -114,6 +120,95 @@ def _checkpoint_sort_key(path: Path) -> tuple[int, float, str]:
     return step, mtime, path.name
 
 
+def _is_flat_action_head_mismatch(error: RuntimeError) -> bool:
+    message = str(error)
+    return (
+        "Error(s) in loading state_dict for MaskedBadmintonPolicy" in message
+        and "action_net.weight" in message
+        and "phi_head.weight" in message
+    )
+
+
+def _copy_policy_state_compatibly(model: PPO, source_state: dict[str, Any]) -> None:
+    target_state = model.policy.state_dict()
+    for key, target_value in target_state.items():
+        source_value = source_state.get(key)
+        if source_value is None:
+            continue
+        if source_value.shape == target_value.shape:
+            target_state[key] = source_value
+            continue
+        if (
+            key in _PREFIX_COMPATIBLE_KEYS
+            and source_value.ndim == 2
+            and target_value.ndim == 2
+            and source_value.shape[0] == target_value.shape[0]
+        ):
+            if source_value.shape[1] >= target_value.shape[1]:
+                target_state[key] = source_value[:, : target_value.shape[1]]
+            elif target_value.shape[1] - source_value.shape[1] == 4 and target_value.shape[1] <= 53:
+                expanded = target_value.clone()
+                expanded.zero_()
+                expanded[:, :29] = source_value[:, :29]
+                expanded[:, 33:] = source_value[:, 29:]
+                target_state[key] = expanded
+            elif target_value.shape[1] - source_value.shape[1] == 4:
+                expanded = target_value.clone()
+                expanded.zero_()
+                expanded[:, : source_value.shape[1]] = source_value
+                target_state[key] = expanded
+            elif target_value.shape[1] - source_value.shape[1] == 8:
+                expanded = target_value.clone()
+                expanded.zero_()
+                expanded[:, :29] = source_value[:, :29]
+                expanded[:, 33:-4] = source_value[:, 29:]
+                target_state[key] = expanded
+    model.policy.load_state_dict(target_state, strict=True)
+
+
+def _load_ppo_with_compatible_policy_state(path: Path) -> PPO:
+    data, params, pytorch_variables = load_from_zip_file(path, device="auto")
+    if data is None or params is None:
+        raise RuntimeError(f"No PPO data found in checkpoint: {path}")
+    policy_state = params.get("policy")
+    if policy_state is None:
+        raise RuntimeError(f"Checkpoint has no policy parameters: {path}")
+
+    if "policy_kwargs" in data and "device" in data["policy_kwargs"]:
+        del data["policy_kwargs"]["device"]
+    for key in {"observation_space", "action_space"}:
+        if key in data:
+            data[key] = _convert_space(data[key])
+
+    model = PPO(
+        policy=data["policy_class"],
+        env=data.get("env"),
+        device="auto",
+        _init_setup_model=False,
+    )
+    model.__dict__.update(data)
+    model._setup_model()
+    _copy_policy_state_compatibly(model, policy_state)
+
+    if pytorch_variables is not None:
+        for name, variable in pytorch_variables.items():
+            if variable is None:
+                continue
+            recursive_setattr(model, f"{name}.data", variable.data)
+    if model.use_sde:
+        model.policy.reset_noise()
+    return model
+
+
+def _load_ppo_for_selfplay(path: Path) -> PPO:
+    try:
+        return PPO.load(path)
+    except RuntimeError as error:
+        if not _is_flat_action_head_mismatch(error):
+            raise
+        return _load_ppo_with_compatible_policy_state(path)
+
+
 @dataclass
 class CheckpointPool:
     checkpoint_dir: Path
@@ -123,6 +218,7 @@ class CheckpointPool:
     base_checkpoint_path: Path | None = None
     recent_fraction: float = 0.5
     seed: int | None = None
+    max_cached_models: int | None = None
     cached_models: dict[Path, PPO] = field(default_factory=dict, init=False)
     checkpoints: list[Path] = field(default_factory=list, init=False)
     rng: np.random.Generator = field(init=False)
@@ -131,13 +227,15 @@ class CheckpointPool:
         if self.pool_size <= 0:
             raise ValueError("pool_size must be positive")
         normalized = self.sampling_mode.strip().lower()
-        if normalized not in {"uniform", "random", "recency", "newest"}:
+        if normalized not in {"uniform", "random", "recency", "linear_recency", "newest"}:
             raise ValueError(f"Unsupported checkpoint sampling mode: {self.sampling_mode}")
         self.sampling_mode = normalized
         if self.recency_power <= 0.0:
             raise ValueError("recency_power must be positive.")
         if not 0.0 < self.recent_fraction <= 1.0:
             raise ValueError("recent_fraction must be in (0, 1].")
+        if self.max_cached_models is not None and self.max_cached_models < 0:
+            raise ValueError("max_cached_models must be zero or greater.")
         self.rng = np.random.default_rng(self.seed)
         self.refresh()
 
@@ -198,6 +296,14 @@ class CheckpointPool:
         count = max(1, int(np.ceil(len(self.checkpoints) * self.recent_fraction)))
         return list(self.checkpoints[:count])
 
+    def sample_recent_path(self, *, exclude_newest: bool = False) -> Path | None:
+        paths = self.recent_checkpoints()
+        if exclude_newest:
+            paths = paths[1:]
+        if not paths:
+            return None
+        return self._sample_from_paths(paths)
+
     def older_checkpoints(self) -> list[Path]:
         if not self.checkpoints:
             return []
@@ -233,7 +339,10 @@ class CheckpointPool:
         if self.sampling_mode in {"uniform", "random"}:
             return paths[int(self.rng.integers(len(paths)))]
         positions = np.arange(len(paths), 0, -1, dtype=np.float64)
-        weights = np.power(positions, float(self.recency_power))
+        if self.sampling_mode == "linear_recency":
+            weights = positions
+        else:
+            weights = np.power(positions, float(self.recency_power))
         probs = weights / weights.sum()
         index = int(self.rng.choice(len(paths), p=probs))
         return paths[index]
@@ -241,9 +350,18 @@ class CheckpointPool:
     def load_model(self, path: Path) -> PPO:
         resolved = path.resolve()
         model = self.cached_models.get(resolved)
-        if model is None:
-            model = PPO.load(resolved)
+        if model is not None:
+            self.cached_models.pop(resolved)
             self.cached_models[resolved] = model
+            return model
+
+        model = _load_ppo_for_selfplay(resolved)
+        if self.max_cached_models != 0:
+            self.cached_models[resolved] = model
+            if self.max_cached_models is not None:
+                while len(self.cached_models) > self.max_cached_models:
+                    oldest_path = next(iter(self.cached_models))
+                    self.cached_models.pop(oldest_path, None)
         return model
 
 
@@ -606,11 +724,15 @@ class MixedCheckpointOpponent(OpponentPolicy):
     checkpoint_pool: CheckpointPool
     sim_config: SimulationConfig
     discrete_action_config: DiscreteActionConfig
+    historical_anchor_pool: CheckpointPool | None = None
     policy_type: str = "velocity_oriented"
     tactic_runtime_config: TacticRuntimeConfig = field(default_factory=TacticRuntimeConfig)
     heuristic_opponent_prob: float = 0.05
     recent_weight: float = 0.6
     older_weight: float = 0.4
+    historical_anchor_weight: float = 0.0
+    recent_continuation_weight: float = 0.0
+    newest_continuation_weight: float = 0.0
     observation_config: ObservationConfig = field(default_factory=ObservationConfig)
     deterministic: bool = False
     hitter_deterministic: bool | None = None
@@ -646,6 +768,16 @@ class MixedCheckpointOpponent(OpponentPolicy):
         self.current_checkpoint_path = None
         self.current_model = None
         self._prepared_hitter_shot = None
+
+        if self._uses_variety_pool():
+            self._start_variety_episode(
+                train_side=train_side,
+                opponent_side=opponent_side,
+                server_side=server_side,
+                config=config,
+            )
+            return
+
         if float(self.checkpoint_pool.rng.random()) < self.heuristic_opponent_prob:
             self.active_source = "heuristic"
             self.active_bucket = "heuristic"
@@ -665,6 +797,85 @@ class MixedCheckpointOpponent(OpponentPolicy):
 
     def refresh(self) -> None:
         self.checkpoint_pool.refresh()
+
+    def _uses_variety_pool(self) -> bool:
+        return (
+            self.historical_anchor_pool is not None
+            or self.historical_anchor_weight > 0.0
+            or self.recent_continuation_weight > 0.0
+            or self.newest_continuation_weight > 0.0
+        )
+
+    def _start_variety_episode(
+        self,
+        *,
+        train_side: Side,
+        opponent_side: Side,
+        server_side: Side,
+        config: SimulationConfig,
+    ) -> None:
+        newest_path = self.checkpoint_pool.newest_path()
+        recent_path = self.checkpoint_pool.sample_recent_path(exclude_newest=True)
+
+        buckets: list[tuple[str, float]] = []
+        if self.heuristic_opponent_prob > 0.0:
+            buckets.append(("heuristic", float(self.heuristic_opponent_prob)))
+        if (
+            self.historical_anchor_pool is not None
+            and self.historical_anchor_pool.checkpoints
+            and self.historical_anchor_weight > 0.0
+        ):
+            buckets.append(("historical", float(self.historical_anchor_weight)))
+        if recent_path is not None and self.recent_continuation_weight > 0.0:
+            buckets.append(("recent_continuation", float(self.recent_continuation_weight)))
+        if newest_path is not None and self.newest_continuation_weight > 0.0:
+            buckets.append(("newest_continuation", float(self.newest_continuation_weight)))
+
+        if not buckets:
+            raise RuntimeError("Variety opponent pool has no available bucket.")
+
+        weights = np.asarray([max(weight, 0.0) for _, weight in buckets], dtype=np.float64)
+        if float(weights.sum()) <= 0.0:
+            bucket_name = buckets[int(self.checkpoint_pool.rng.integers(len(buckets)))][0]
+        else:
+            probabilities = weights / weights.sum()
+            bucket_name = buckets[int(self.checkpoint_pool.rng.choice(len(buckets), p=probabilities))][0]
+
+        if bucket_name == "heuristic":
+            self.active_source = "heuristic"
+            self.active_bucket = "heuristic"
+            self.heuristic_opponent.on_episode_start(
+                train_side=train_side,
+                opponent_side=opponent_side,
+                server_side=server_side,
+                config=config,
+            )
+            return
+
+        if bucket_name == "historical":
+            if self.historical_anchor_pool is None:
+                raise RuntimeError("Historical anchor bucket selected without a historical anchor pool.")
+            self.active_source = "checkpoint"
+            self.active_bucket = "historical"
+            self.current_checkpoint_path = self.historical_anchor_pool.sample_path()
+            self.current_model = self.historical_anchor_pool.load_model(self.current_checkpoint_path)
+            return
+
+        if bucket_name == "newest_continuation":
+            if newest_path is None:
+                raise RuntimeError("Newest continuation bucket selected without a checkpoint.")
+            self.active_source = "checkpoint"
+            self.active_bucket = "newest_continuation"
+            self.current_checkpoint_path = newest_path
+            self.current_model = self.checkpoint_pool.load_model(self.current_checkpoint_path)
+            return
+
+        if recent_path is None:
+            raise RuntimeError("Recent continuation bucket selected without a checkpoint.")
+        self.active_source = "checkpoint"
+        self.active_bucket = "recent_continuation"
+        self.current_checkpoint_path = recent_path
+        self.current_model = self.checkpoint_pool.load_model(self.current_checkpoint_path)
 
     def label(self) -> str:
         if self.active_source == "heuristic":
@@ -897,9 +1108,24 @@ class SelfPlayEvalCallback(BaseCallback):
         self.deterministic = bool(deterministic)
         self.timestep_offset = int(timestep_offset)
         self.best_score = float("-inf")
-        self.last_eval_timestep = 0
+        self.last_eval_timestep = self._initial_last_eval_timestep()
         self.current_anchor_step = self._initial_anchor_step()
         self.current_anchor_path = self._initialize_anchor_checkpoint()
+
+    @staticmethod
+    def _initial_last_eval_timestep_for_offset(*, timestep_offset: int, eval_freq: int) -> int:
+        if eval_freq <= 0:
+            return 0
+        remainder = int(timestep_offset) % int(eval_freq)
+        if remainder == 0:
+            return 0
+        return -remainder
+
+    def _initial_last_eval_timestep(self) -> int:
+        return self._initial_last_eval_timestep_for_offset(
+            timestep_offset=self.timestep_offset,
+            eval_freq=self.eval_freq,
+        )
 
     def _initial_anchor_step(self) -> int | None:
         if self.anchor_eval_interval <= 0:
@@ -929,7 +1155,9 @@ class SelfPlayEvalCallback(BaseCallback):
             return
         if effective_timestep <= 0:
             return
-        next_anchor_step = ((effective_timestep // self.anchor_eval_interval) * self.anchor_eval_interval)
+        if effective_timestep % self.anchor_eval_interval != 0:
+            return
+        next_anchor_step = effective_timestep
         if self.current_anchor_step is None:
             if next_anchor_step <= 0:
                 return
@@ -1438,6 +1666,18 @@ def build_selfplay_env(
     counterfactual_opponent_response_samples: int = COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES,
     recovery_counterfactual_expected_response_target: bool = True,
     recovery_full_diagnostics_probability: float = 0.0,
+    use_shot_cf: bool = False,
+    shot_cf_coef: float = 0.1,
+    shot_cf_top_m: int = 20,
+    shot_cf_num_modes: int = 3,
+    shot_cf_min_landing_dist: float = 1.0,
+    shot_cf_depth: int = 1,
+    shot_cf_include_chosen: bool = True,
+    shot_cf_skip_low_diversity: bool = True,
+    shot_cf_min_modes: int = 2,
+    shot_cf_value_detach: bool = True,
+    shot_cf_normalize: bool = True,
+    shot_cf_debug_log: bool = False,
 ) -> BadmintonRLEnv:
     return BadmintonRLEnv(
         config=sim_config or SimulationConfig(),
@@ -1459,6 +1699,18 @@ def build_selfplay_env(
             counterfactual_opponent_response_samples=counterfactual_opponent_response_samples,
             recovery_counterfactual_expected_response_target=recovery_counterfactual_expected_response_target,
             recovery_full_diagnostics_probability=recovery_full_diagnostics_probability,
+            use_shot_cf=use_shot_cf,
+            shot_cf_coef=shot_cf_coef,
+            shot_cf_top_m=shot_cf_top_m,
+            shot_cf_num_modes=shot_cf_num_modes,
+            shot_cf_min_landing_dist=shot_cf_min_landing_dist,
+            shot_cf_depth=shot_cf_depth,
+            shot_cf_include_chosen=shot_cf_include_chosen,
+            shot_cf_skip_low_diversity=shot_cf_skip_low_diversity,
+            shot_cf_min_modes=shot_cf_min_modes,
+            shot_cf_value_detach=shot_cf_value_detach,
+            shot_cf_normalize=shot_cf_normalize,
+            shot_cf_debug_log=shot_cf_debug_log,
         ),
         discrete_action_config=discrete_action_config,
         opponent=opponent,

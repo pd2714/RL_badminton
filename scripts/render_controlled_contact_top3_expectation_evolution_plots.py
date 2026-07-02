@@ -75,6 +75,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Compute CSV/JSON cache but skip PNG rendering.",
     )
+    parser.add_argument(
+        "--cache-every-scenarios",
+        type=int,
+        default=9,
+        help=(
+            "Rewrite intermediate CSV/JSON cache after this many scenario evaluations. "
+            "Use 0 to cache only at the end."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -82,6 +91,8 @@ def main() -> None:
     args = parse_args()
     if args.top_k <= 0:
         raise ValueError("--top-k must be positive")
+    if args.cache_every_scenarios < 0:
+        raise ValueError("--cache-every-scenarios must be nonnegative")
 
     probe_dir = args.probe_dir
     probe_summary = _load_probe_summary(probe_dir)
@@ -117,15 +128,39 @@ def main() -> None:
     checkpoints = _matching_checkpoints(run_dir, probe_dir, args)
     cache_dir = probe_dir / "top3_expectation_evolution_probe_views"
     ensure_directory(cache_dir)
+    cache_metadata = {
+        "run_dir": str(run_dir),
+        "probe_dir": str(probe_dir),
+        "train_side": train_side,
+        "top_k": int(args.top_k),
+        "value_checkpoint_path": None if value_checkpoint is None else str(value_checkpoint),
+        "value_checkpoint_step": None if value_checkpoint is None else checkpoint_step(value_checkpoint),
+        "scenario_count": len(scenarios),
+        "checkpoint_count": len(checkpoints),
+        "checkpoint_steps": [checkpoint_step(checkpoint) for checkpoint in checkpoints],
+    }
 
     summary_rows: list[dict[str, Any]] = []
     sample_rows: list[dict[str, Any]] = []
-    for checkpoint in checkpoints:
+    total_evaluations = len(checkpoints) * len(scenarios)
+    completed_evaluations = 0
+    _write_progress_cache(
+        cache_dir,
+        cache_metadata,
+        summary_rows,
+        sample_rows,
+        status="running",
+        completed_evaluations=completed_evaluations,
+        total_evaluations=total_evaluations,
+        current_step=None,
+        current_probe_id=None,
+    )
+    for checkpoint_index, checkpoint in enumerate(checkpoints):
         step = checkpoint_step(checkpoint)
         print(f"top3 expectation anchor_step_{step}", flush=True)
         model = load_anchor_model(checkpoint, recovery_choice_diagnostics=False)
         critic_model = value_model or model
-        for scenario in scenarios:
+        for scenario_index, scenario in enumerate(scenarios):
             rows, summary = _top3_expected_rows_for_scenario(
                 model=model,
                 critic_model=critic_model,
@@ -141,25 +176,44 @@ def main() -> None:
             )
             sample_rows.extend(rows)
             summary_rows.append(summary)
+            completed_evaluations += 1
+            should_cache = (
+                args.cache_every_scenarios > 0
+                and (
+                    completed_evaluations % int(args.cache_every_scenarios) == 0
+                    or scenario_index == len(scenarios) - 1
+                )
+            )
+            if should_cache:
+                _write_progress_cache(
+                    cache_dir,
+                    cache_metadata,
+                    summary_rows,
+                    sample_rows,
+                    status="running",
+                    completed_evaluations=completed_evaluations,
+                    total_evaluations=total_evaluations,
+                    current_step=step,
+                    current_probe_id=scenario.probe_id,
+                )
+                print(
+                    (
+                        f"cached {completed_evaluations}/{total_evaluations} "
+                        f"scenario evaluations ({len(sample_rows)} sample rows)"
+                    ),
+                    flush=True,
+                )
 
-    _write_csv(cache_dir / "top3_expectation_evolution_samples.csv", sample_rows)
-    _write_csv(cache_dir / "top3_expectation_evolution_summary.csv", summary_rows)
-    (cache_dir / "top3_expectation_evolution_summary.json").write_text(
-        json.dumps(
-            {
-                "run_dir": str(run_dir),
-                "probe_dir": str(probe_dir),
-                "train_side": train_side,
-                "top_k": int(args.top_k),
-                "value_checkpoint_path": None if value_checkpoint is None else str(value_checkpoint),
-                "value_checkpoint_step": None if value_checkpoint is None else checkpoint_step(value_checkpoint),
-                "scenario_count": len(scenarios),
-                "checkpoint_count": len(checkpoints),
-                "rows": summary_rows,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+    _write_progress_cache(
+        cache_dir,
+        cache_metadata,
+        summary_rows,
+        sample_rows,
+        status="complete",
+        completed_evaluations=completed_evaluations,
+        total_evaluations=total_evaluations,
+        current_step=None,
+        current_probe_id=None,
     )
 
     if not args.write_cache_only:
@@ -436,6 +490,57 @@ def _weighted_summary(
     for name in LANDING_ZONE_NAMES:
         summary[f"landing_zone_freq_{name}"] = float(landing_zone_weights.get(name, 0.0))
     return summary
+
+
+def _write_progress_cache(
+    cache_dir: Path,
+    metadata: dict[str, Any],
+    summary_rows: list[dict[str, Any]],
+    sample_rows: list[dict[str, Any]],
+    *,
+    status: str,
+    completed_evaluations: int,
+    total_evaluations: int,
+    current_step: int | None,
+    current_probe_id: str | None,
+) -> None:
+    progress = {
+        "status": status,
+        "completed_evaluations": int(completed_evaluations),
+        "total_evaluations": int(total_evaluations),
+        "completed_fraction": (
+            None if total_evaluations <= 0 else float(completed_evaluations) / float(total_evaluations)
+        ),
+        "current_step": current_step,
+        "current_probe_id": current_probe_id,
+        "summary_row_count": len(summary_rows),
+        "sample_row_count": len(sample_rows),
+    }
+    _write_json_atomic(cache_dir / "top3_expectation_evolution_progress.json", {**metadata, **progress})
+    if summary_rows:
+        _write_csv_atomic(cache_dir / "top3_expectation_evolution_summary.csv", summary_rows)
+    if sample_rows:
+        _write_csv_atomic(cache_dir / "top3_expectation_evolution_samples.csv", sample_rows)
+    _write_json_atomic(
+        cache_dir / "top3_expectation_evolution_summary.json",
+        {
+            **metadata,
+            **progress,
+            "rows": summary_rows,
+        },
+    )
+
+
+def _write_csv_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    _write_csv(tmp_path, rows)
+    tmp_path.replace(path)
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def _write_evolution_plots(

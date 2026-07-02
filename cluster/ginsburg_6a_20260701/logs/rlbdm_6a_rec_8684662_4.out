@@ -1,0 +1,101 @@
+readiness pure_cfa seed 59: step=6000000 target=6000000
+Evaluation started for seed 59 at Wed Jul  1 21:19:57 EDT 2026
+Ignoring 12 stale/incompatible partial pair results from outputs/rl/ginsburg_20260622/eval/seed_59/panel_6a_learned_centered_recovery_200r/pair_results.jsonl
+learned_0p2m vs learned_2m: wr=0.155 (200 rallies)
+learned_0p2m vs centered_2m: wr=0.910 (200 rallies)
+learned_0p2m vs learned_4m: wr=0.165 (200 rallies)
+learned_0p2m vs centered_4m: wr=0.960 (200 rallies)
+learned_0p2m vs learned_6m: wr=0.165 (200 rallies)
+learned_0p2m vs centered_6m: wr=0.775 (200 rallies)
+centered_0p2m vs learned_2m: wr=0.010 (200 rallies)
+centered_0p2m vs centered_2m: wr=0.625 (200 rallies)
+centered_0p2m vs learned_4m: wr=0.120 (200 rallies)
+centered_0p2m vs centered_4m: wr=0.395 (200 rallies)
+centered_0p2m vs learned_6m: wr=0.005 (200 rallies)
+centered_0p2m vs centered_6m: wr=0.365 (200 rallies)
+learned_1m vs learned_2m: already complete
+learned_1m vs centered_2m: already complete
+learned_1m vs learned_4m: already complete
+learned_1m vs centered_4m: already complete
+learned_1m vs learned_6m: already complete
+learned_1m vs centered_6m: already complete
+centered_1m vs learned_2m: already complete
+centered_1m vs centered_2m: already complete
+centered_1m vs learned_4m: already complete
+centered_1m vs centered_4m: already complete
+centered_1m vs learned_6m: already complete
+centered_1m vs centered_6m: already complete
+learned_2m vs centered_2m: already complete
+learned_2m vs learned_4m: already complete
+learned_2m vs centered_4m: already complete
+learned_2m vs learned_6m: already complete
+learned_2m vs centered_6m: already complete
+centered_2m vs learned_2m: already complete
+centered_2m vs learned_4m: already complete
+centered_2m vs centered_4m: already complete
+centered_2m vs learned_6m: already complete
+centered_2m vs centered_6m: already complete
+learned_3m vs learned_2m: already complete
+learned_3m vs centered_2m: already complete
+learned_3m vs learned_4m: already complete
+learned_3m vs centered_4m: already complete
+learned_3m vs learned_6m: already complete
+learned_3m vs centered_6m: already complete
+centered_3m vs learned_2m: already complete
+centered_3m vs centered_2m: already complete
+centered_3m vs learned_4m: already complete
+centered_3m vs centered_4m: already complete
+centered_3m vs learned_6m: already complete
+centered_3m vs centered_6m: already complete
+learned_4m vs learned_2m: already complete
+learned_4m vs centered_2m: already complete
+learned_4m vs centered_4m: already complete
+learned_4m vs learned_6m: already complete
+learned_4m vs centered_6m: already complete
+centered_4m vs learned_2m: already complete
+centered_4m vs centered_2m: already complete
+centered_4m vs learned_4m: already complete
+centered_4m vs learned_6m: already complete
+centered_4m vs centered_6m: already complete
+learned_5m vs learned_2m: already complete
+learned_5m vs centered_2m: already complete
+learned_5m vs learned_4m: already complete
+learned_5m vs centered_4m: already complete
+learned_5m vs learned_6m: already complete
+learned_5m vs centered_6m: already complete
+centered_5m vs learned_2m: already complete
+centered_5m vs centered_2m: already complete
+centered_5m vs learned_4m: already complete
+centered_5m vs centered_4m: already complete
+centered_5m vs learned_6m: already complete
+centered_5m vs centered_6m: already complete
+learned_6m vs learned_2m: wr=0.675 (200 rallies)
+learned_6m vs centered_2m: wr=0.785 (200 rallies)
+learned_6m vs learned_4m: wr=0.675 (200 rallies)
+learned_6m vs centered_4m: wr=0.720 (200 rallies)
+learned_6m vs centered_6m: wr=0.715 (200 rallies)
+centered_6m vs learned_2m: wr=0.520 (200 rallies)
+centered_6m vs centered_2m: wr=0.580 (200 rallies)
+centered_6m vs learned_4m: wr=0.540 (200 rallies)
+centered_6m vs centered_4m: wr=0.545 (200 rallies)
+centered_6m vs learned_6m: wr=0.370 (200 rallies)
+manifest: outputs/rl/ginsburg_20260622/eval/seed_59/panel_6a_learned_centered_recovery_200r/manifest.json
+report: outputs/rl/ginsburg_20260622/eval/seed_59/panel_6a_learned_centered_recovery_200r/recovery_ablation_report.json
+ratings: outputs/rl/ginsburg_20260622/eval/seed_59/panel_6a_learned_centered_recovery_200r/elo_by_variant.csv
+plot: outputs/rl/ginsburg_20260622/eval/seed_59/panel_6a_learned_centered_recovery_200r/elo_vs_checkpoint.png
+plot: outputs/rl/ginsburg_20260622/eval/seed_59/panel_6a_learned_centered_recovery_200r/mean_pool_win_rate_vs_checkpoint.png
+centered step=200000: elo=1312.2
+centered step=1000000: elo=1387.8
+centered step=2000000: elo=1384.2
+centered step=3000000: elo=1455.5
+centered step=4000000: elo=1314.7
+centered step=5000000: elo=1313.1
+centered step=6000000: elo=1520.7
+learned step=200000: elo=1544.0
+learned step=1000000: elo=1552.6
+learned step=2000000: elo=1616.1
+learned step=3000000: elo=1619.2
+learned step=4000000: elo=1625.2
+learned step=5000000: elo=1670.9
+learned step=6000000: elo=1683.7
+Evaluation finished for seed 59 at Wed Jul  1 21:28:25 EDT 2026

@@ -12,6 +12,18 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.utils import explained_variance, obs_as_tensor
 from stable_baselines3.common.vec_env import VecEnv
 
+from badminton1d.dynamics import (
+    candidate_intercept_points,
+    landing_position,
+    prepare_shot,
+    reaction_miss_probability,
+    step_stage,
+)
+from badminton1d.obs import ObservationConfig, ObservationEncoder
+from badminton1d.policy import ROLE_IS_RECEIVER_INDEX, STAGE_PROGRESS_INDEX, _state_from_observation_row
+from badminton1d.shot_cf import ShotCFCandidate, select_diverse_shot_candidates
+from badminton1d.state import ShotAction, StageRecord
+
 
 class RecoveryFactorizedRolloutBufferSamples(NamedTuple):
     observations: th.Tensor
@@ -26,6 +38,8 @@ class RecoveryFactorizedRolloutBufferSamples(NamedTuple):
     recovery_loss_mask: th.Tensor
     recovery_distribution_targets: th.Tensor
     recovery_distribution_mask: th.Tensor
+    shot_cf_advantages: th.Tensor
+    shot_cf_loss_mask: th.Tensor
 
 
 class RecoveryFactorizedRolloutBuffer(RolloutBuffer):
@@ -36,6 +50,8 @@ class RecoveryFactorizedRolloutBuffer(RolloutBuffer):
         self.log_probs_recovery = np.zeros(shape, dtype=np.float32)
         self.recovery_advantages = np.zeros(shape, dtype=np.float32)
         self.recovery_loss_mask = np.zeros(shape, dtype=np.float32)
+        self.shot_cf_advantages = np.zeros(shape, dtype=np.float32)
+        self.shot_cf_loss_mask = np.zeros(shape, dtype=np.float32)
         distribution_bin_count = getattr(self, "_recovery_distribution_bin_count", None)
         if distribution_bin_count is None:
             self.recovery_distribution_targets = None
@@ -60,6 +76,8 @@ class RecoveryFactorizedRolloutBuffer(RolloutBuffer):
         recovery_loss_mask: th.Tensor | None = None,
         recovery_distribution_target: th.Tensor | None = None,
         recovery_distribution_mask: th.Tensor | None = None,
+        shot_cf_advantage: th.Tensor | None = None,
+        shot_cf_loss_mask: th.Tensor | None = None,
     ) -> None:
         pos = self.pos
         if log_prob_shot is None:
@@ -70,12 +88,18 @@ class RecoveryFactorizedRolloutBuffer(RolloutBuffer):
             recovery_advantage = th.zeros_like(log_prob)
         if recovery_loss_mask is None:
             recovery_loss_mask = th.zeros_like(log_prob)
+        if shot_cf_advantage is None:
+            shot_cf_advantage = th.zeros_like(log_prob)
+        if shot_cf_loss_mask is None:
+            shot_cf_loss_mask = th.zeros_like(log_prob)
 
         super().add(obs, action, reward, episode_start, value, log_prob)
         self.log_probs_shot[pos] = log_prob_shot.clone().cpu().numpy().flatten()
         self.log_probs_recovery[pos] = log_prob_recovery.clone().cpu().numpy().flatten()
         self.recovery_advantages[pos] = recovery_advantage.clone().cpu().numpy().flatten()
         self.recovery_loss_mask[pos] = recovery_loss_mask.clone().cpu().numpy().flatten()
+        self.shot_cf_advantages[pos] = shot_cf_advantage.clone().cpu().numpy().flatten()
+        self.shot_cf_loss_mask[pos] = shot_cf_loss_mask.clone().cpu().numpy().flatten()
         if recovery_distribution_target is not None and recovery_distribution_mask is not None:
             target_np = recovery_distribution_target.detach().cpu().numpy()
             mask_np = recovery_distribution_mask.detach().cpu().numpy()
@@ -112,6 +136,8 @@ class RecoveryFactorizedRolloutBuffer(RolloutBuffer):
                 "recovery_loss_mask",
                 "recovery_distribution_targets",
                 "recovery_distribution_mask",
+                "shot_cf_advantages",
+                "shot_cf_loss_mask",
             ]
             for tensor in tensor_names:
                 self.__dict__[tensor] = self.swap_and_flatten(self.__dict__[tensor])
@@ -139,6 +165,8 @@ class RecoveryFactorizedRolloutBuffer(RolloutBuffer):
             self.recovery_loss_mask[batch_inds].flatten(),
             self.recovery_distribution_targets[batch_inds],
             self.recovery_distribution_mask[batch_inds],
+            self.shot_cf_advantages[batch_inds].flatten(),
+            self.shot_cf_loss_mask[batch_inds].flatten(),
         )
         return RecoveryFactorizedRolloutBufferSamples(*tuple(map(self.to_torch, data)))
 
@@ -154,9 +182,22 @@ class RecoveryFactorizedPPO(PPO):
         recovery_counterfactual_advantage_coef: float = 0.05,
         recovery_counterfactual_distribution_coef: float = 0.0,
         recovery_counterfactual_distribution_temperature: float = 0.25,
+        use_shot_cf: bool = False,
+        shot_cf_coef: float = 0.1,
+        shot_cf_top_m: int = 20,
+        shot_cf_num_modes: int = 3,
+        shot_cf_min_landing_dist: float = 1.0,
+        shot_cf_depth: int = 1,
+        shot_cf_include_chosen: bool = True,
+        shot_cf_skip_low_diversity: bool = True,
+        shot_cf_min_modes: int = 2,
+        shot_cf_value_detach: bool = True,
+        shot_cf_normalize: bool = True,
+        shot_cf_debug_log: bool = False,
         **kwargs,
     ) -> None:
         self.use_recovery_factorized_advantage = bool(use_recovery_factorized_advantage)
+        self.use_shot_cf = bool(use_shot_cf)
         if recovery_counterfactual_baseline not in {"average", "best"}:
             raise ValueError(
                 "recovery_counterfactual_baseline must be either "
@@ -174,13 +215,37 @@ class RecoveryFactorizedPPO(PPO):
         self.recovery_counterfactual_distribution_temperature = float(
             recovery_counterfactual_distribution_temperature
         )
-        if self.use_recovery_factorized_advantage and kwargs.get("rollout_buffer_class") is None:
+        if shot_cf_coef < 0.0:
+            raise ValueError("shot_cf_coef must be zero or greater")
+        if shot_cf_top_m <= 0:
+            raise ValueError("shot_cf_top_m must be positive")
+        if shot_cf_num_modes <= 0:
+            raise ValueError("shot_cf_num_modes must be positive")
+        if shot_cf_min_landing_dist < 0.0:
+            raise ValueError("shot_cf_min_landing_dist must be non-negative")
+        if shot_cf_depth != 1:
+            raise ValueError("Only shot_cf_depth=1 is implemented")
+        if shot_cf_min_modes <= 0:
+            raise ValueError("shot_cf_min_modes must be positive")
+        self.shot_cf_coef = float(shot_cf_coef)
+        self.shot_cf_top_m = int(shot_cf_top_m)
+        self.shot_cf_num_modes = int(shot_cf_num_modes)
+        self.shot_cf_min_landing_dist = float(shot_cf_min_landing_dist)
+        self.shot_cf_depth = int(shot_cf_depth)
+        self.shot_cf_include_chosen = bool(shot_cf_include_chosen)
+        self.shot_cf_skip_low_diversity = bool(shot_cf_skip_low_diversity)
+        self.shot_cf_min_modes = int(shot_cf_min_modes)
+        self.shot_cf_value_detach = bool(shot_cf_value_detach)
+        self.shot_cf_normalize = bool(shot_cf_normalize)
+        self.shot_cf_debug_log = bool(shot_cf_debug_log)
+        self._last_shot_cf_stats: dict[str, float] = {}
+        if (self.use_recovery_factorized_advantage or self.use_shot_cf) and kwargs.get("rollout_buffer_class") is None:
             kwargs["rollout_buffer_class"] = RecoveryFactorizedRolloutBuffer
         super().__init__(*args, **kwargs)
 
     def _can_use_recovery_factorization(self) -> bool:
         return (
-            self.use_recovery_factorized_advantage
+            (self.use_recovery_factorized_advantage or self.use_shot_cf)
             and isinstance(self.rollout_buffer, RecoveryFactorizedRolloutBuffer)
             and getattr(self.policy, "output_mode", None) == "conditional_prob"
             and hasattr(self.policy, "evaluate_recovery_factorized_actions")
@@ -752,6 +817,458 @@ class RecoveryFactorizedPPO(PPO):
             th.as_tensor(distribution_mask_np, dtype=before.dtype, device=before.device),
         )
 
+    def _normalize_shot_cf_advantage(self, advantages: th.Tensor, mask: th.Tensor) -> th.Tensor:
+        mask_bool = mask > 0.5
+        normalized = th.zeros_like(advantages)
+        if not th.any(mask_bool):
+            return normalized
+        active = advantages[mask_bool]
+        if self.shot_cf_normalize and active.numel() > 1:
+            active = (active - active.mean()) / (active.std() + 1e-8)
+        normalized[mask_bool] = active
+        return normalized
+
+    def _shot_cf_candidate_actions_for_row(
+        self,
+        obs_row: th.Tensor,
+        latent_pi_row: th.Tensor,
+        chosen_action: int,
+        *,
+        train_side: str,
+        top_m: int,
+    ) -> tuple[list[ShotCFCandidate], ShotCFCandidate | None]:
+        mapper = getattr(self.policy, "_action_mapper", None)
+        if mapper is None or float(obs_row[ROLE_IS_RECEIVER_INDEX]) >= 0.5:
+            return [], None
+
+        stage_index = 0 if float(obs_row[STAGE_PROGRESS_INDEX]) <= 1e-6 else 1
+        state = _state_from_observation_row(obs_row, mapper.config, stage_index=stage_index)
+        legal_full = self.policy._conditional_hitter_legal_mask(obs_row.reshape(1, -1))[0].detach().cpu().numpy()
+        legal_shots = legal_full.any(axis=3)
+        if not np.any(legal_shots):
+            return [], None
+
+        obs_batch = obs_row.reshape(1, -1)
+        latent_batch = latent_pi_row.reshape(1, -1)
+        phi_logits, _, _, _, _ = self.policy._conditional_component_logits(obs_batch, latent_batch)
+        phi_logp = F.log_softmax(phi_logits[0], dim=0)
+        shot_rows: list[tuple[float, int, int, int]] = []
+        for phi_index in range(int(getattr(self.policy, "_conditional_phi_count", 0))):
+            phi_tensor = th.as_tensor([phi_index], dtype=th.long, device=obs_row.device)
+            _, theta_logits, _, _, _ = self.policy._conditional_component_logits(
+                obs_batch,
+                latent_batch,
+                phi=phi_tensor,
+            )
+            if theta_logits is None:
+                continue
+            theta_logp = F.log_softmax(theta_logits[0], dim=0)
+            for theta_index in range(int(getattr(self.policy, "_conditional_theta_count", 0))):
+                if not np.any(legal_shots[phi_index, theta_index]):
+                    continue
+                theta_tensor = th.as_tensor([theta_index], dtype=th.long, device=obs_row.device)
+                _, _, speed_logits, _, _ = self.policy._conditional_component_logits(
+                    obs_batch,
+                    latent_batch,
+                    phi=phi_tensor,
+                    theta=theta_tensor,
+                )
+                if speed_logits is None:
+                    continue
+                speed_logp = F.log_softmax(speed_logits[0], dim=0)
+                for speed_index in range(int(getattr(self.policy, "_conditional_speed_count", 0))):
+                    if not bool(legal_shots[phi_index, theta_index, speed_index]):
+                        continue
+                    log_probability = float(
+                        phi_logp[phi_index].item()
+                        + theta_logp[theta_index].item()
+                        + speed_logp[speed_index].item()
+                    )
+                    shot_rows.append((log_probability, phi_index, theta_index, speed_index))
+
+        if not shot_rows:
+            return [], None
+        shot_rows.sort(key=lambda row: row[0], reverse=True)
+        selected_rows = shot_rows[: max(int(top_m), 1)]
+        max_logp = float(selected_rows[0][0])
+        weights = np.asarray([np.exp(row[0] - max_logp) for row in selected_rows], dtype=np.float64)
+        total_weight = float(np.sum(weights))
+        if total_weight <= 0.0 or not np.isfinite(total_weight):
+            probabilities = np.full(weights.shape[0], 1.0 / max(weights.shape[0], 1), dtype=np.float64)
+        else:
+            probabilities = weights / total_weight
+
+        def _candidate_from_indices(
+            phi_index: int,
+            theta_index: int,
+            speed_index: int,
+            log_probability: float,
+            probability: float,
+            *,
+            forced_flat_index: int | None = None,
+        ) -> ShotCFCandidate | None:
+            phi_tensor = th.as_tensor([phi_index], dtype=th.long, device=obs_row.device)
+            theta_tensor = th.as_tensor([theta_index], dtype=th.long, device=obs_row.device)
+            speed_tensor = th.as_tensor([speed_index], dtype=th.long, device=obs_row.device)
+            _, _, _, recovery_logits, _ = self.policy._conditional_component_logits(
+                obs_batch,
+                latent_batch,
+                phi=phi_tensor,
+                theta=theta_tensor,
+                speed=speed_tensor,
+            )
+            if recovery_logits is None:
+                return None
+            recovery_mask = th.as_tensor(
+                legal_full[phi_index, theta_index, speed_index],
+                dtype=th.bool,
+                device=obs_row.device,
+            )
+            if not th.any(recovery_mask):
+                return None
+            recovery_logits_row = recovery_logits[0].masked_fill(~recovery_mask, -th.inf)
+            recovery_index = int(th.argmax(recovery_logits_row).item())
+            flat_index = int(
+                forced_flat_index
+                if forced_flat_index is not None
+                else (
+                    ((phi_index * self.policy._conditional_theta_count + theta_index)
+                     * self.policy._conditional_speed_count + speed_index)
+                    * self.policy._conditional_recovery_count
+                    + recovery_index
+                )
+            )
+            try:
+                decode = mapper.decode_hitter_for_agent(flat_index, state, train_side)
+                landing_x, landing_y = landing_position(state, decode.shot_action, mapper.config)
+            except (RuntimeError, ValueError, IndexError, FloatingPointError):
+                return None
+            return ShotCFCandidate(
+                flat_index=flat_index,
+                shot_key=(int(phi_index), int(theta_index), int(speed_index)),
+                log_probability=float(log_probability),
+                probability=float(probability),
+                shot_action=decode.shot_action,
+                landing_x=float(landing_x),
+                landing_y=float(landing_y),
+            )
+
+        candidates: list[ShotCFCandidate] = []
+        for (log_probability, phi_index, theta_index, speed_index), probability in zip(selected_rows, probabilities):
+            candidate = _candidate_from_indices(
+                phi_index,
+                theta_index,
+                speed_index,
+                log_probability,
+                float(probability),
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+
+        chosen_candidate = None
+        try:
+            phi, theta, speed, _ = self.policy._conditional_decompose_actions(
+                th.as_tensor([chosen_action], dtype=th.long, device=obs_row.device)
+            )
+            chosen_phi = int(phi[0].item())
+            chosen_theta = int(theta[0].item())
+            chosen_speed = int(speed[0].item())
+            matching_logp = next(
+                (
+                    float(log_probability)
+                    for log_probability, row_phi, row_theta, row_speed in shot_rows
+                    if (row_phi, row_theta, row_speed) == (chosen_phi, chosen_theta, chosen_speed)
+                ),
+                0.0,
+            )
+            chosen_candidate = _candidate_from_indices(
+                chosen_phi,
+                chosen_theta,
+                chosen_speed,
+                matching_logp,
+                1.0,
+                forced_flat_index=int(chosen_action),
+            )
+        except (RuntimeError, ValueError, IndexError, FloatingPointError):
+            chosen_candidate = None
+        return candidates, chosen_candidate
+
+    def _shot_cf_terminal_reward(self, info: dict, winner: str | None) -> float:
+        if winner == info.get("train_side", "left"):
+            return float(info.get("shot_cf_win_reward", 1.0))
+        return float(info.get("shot_cf_loss_reward", -1.0))
+
+    def _shot_cf_lowest_reaction_risk_intercept_index(
+        self,
+        state,
+        action: ShotAction,
+        feasible: list[int],
+        *,
+        candidate_times: np.ndarray | None = None,
+    ) -> int | None:
+        if not feasible:
+            return None
+        config = getattr(getattr(self.policy, "_action_mapper", None), "config", None)
+        if config is None:
+            return int(feasible[0])
+        if candidate_times is None:
+            candidate_times, _, _, _ = candidate_intercept_points(state, action, config)
+        best_index = None
+        best_key: tuple[float, float] | None = None
+        for index in feasible:
+            if not 0 <= index < len(candidate_times):
+                continue
+            intercept_time = float(candidate_times[index])
+            key = (reaction_miss_probability(intercept_time, config), -intercept_time)
+            if best_key is None or key < best_key:
+                best_key = key
+                best_index = int(index)
+        return best_index
+
+    def _shot_cf_value_inputs_for_selection(
+        self,
+        selection,
+        info: dict,
+    ) -> tuple[list[np.ndarray | None], np.ndarray]:
+        mapper = getattr(self.policy, "_action_mapper", None)
+        if mapper is None:
+            return [], np.asarray([], dtype=np.float32)
+        record = info.get("last_record")
+        if not isinstance(record, StageRecord):
+            return [], np.asarray([], dtype=np.float32)
+        config = mapper.config
+        encoder = ObservationEncoder(
+            config,
+            ObservationConfig(
+                include_feasible_mask=bool(info.get("include_feasible_mask", True)),
+                include_reaction_risk_features=bool(info.get("include_reaction_risk_features", True)),
+            ),
+        )
+        response_action = info.get("shot_cf_opponent_response_action")
+        score_targets: list[float] = []
+        observations: list[np.ndarray | None] = []
+        for candidate in selection.candidates:
+            try:
+                projected = mapper.project_hitter_action(record.state_before, candidate.shot_action)
+                prepared = projected.prepared_shot
+                applied_action = prepared.validated_action.applied
+                feasible = list(prepared.feasible_indices)
+                intercept_index = self._shot_cf_lowest_reaction_risk_intercept_index(
+                    record.state_before,
+                    applied_action,
+                    feasible,
+                    candidate_times=prepared.candidate_times,
+                )
+                first_record = step_stage(
+                    record.state_before,
+                    projected.shot_action,
+                    intercept_index,
+                    config,
+                    enable_reaction_miss=False,
+                    prepared_shot=prepared,
+                )
+            except (RuntimeError, ValueError, IndexError, FloatingPointError):
+                observations.append(None)
+                score_targets.append(float(info.get("shot_cf_loss_reward", -1.0)))
+                continue
+
+            if first_record.next_state.rally_done:
+                observations.append(None)
+                score_targets.append(self._shot_cf_terminal_reward(info, first_record.next_state.winner))
+                continue
+
+            if not isinstance(response_action, ShotAction):
+                observations.append(None)
+                score_targets.append(float("nan"))
+                continue
+
+            try:
+                response_prepared = prepare_shot(first_record.next_state, response_action, config)
+            except (RuntimeError, ValueError, FloatingPointError):
+                observations.append(None)
+                score_targets.append(float(info.get("shot_cf_win_reward", 1.0)) * self.gamma)
+                continue
+            response_applied = response_prepared.validated_action.applied
+            response_feasible = list(response_prepared.feasible_indices)
+            if not response_feasible:
+                observations.append(None)
+                score_targets.append(float(info.get("shot_cf_loss_reward", -1.0)) * self.gamma)
+                continue
+            observations.append(
+                encoder.encode(
+                    state=first_record.next_state,
+                    agent_side=info.get("train_side", "left"),
+                    role="receiver",
+                    server_side=info.get("server", "left"),
+                    score_left=int(info.get("score_left", 0)),
+                    score_right=int(info.get("score_right", 0)),
+                    pending_action=response_applied,
+                    feasible_indices=response_feasible,
+                    prepared_shot=response_prepared,
+                )
+            )
+            score_targets.append(float("nan"))
+        return observations, np.asarray(score_targets, dtype=np.float32)
+
+    def _shot_cf_advantage_from_transitions(
+        self,
+        current_obs_tensor: th.Tensor,
+        actions_tensor: th.Tensor,
+        infos: list[dict],
+    ) -> tuple[th.Tensor, th.Tensor]:
+        base = actions_tensor.flatten()
+        advantages_np = np.zeros(base.shape[0], dtype=np.float32)
+        mask_np = np.zeros(base.shape[0], dtype=np.float32)
+        stats: dict[str, list[float]] = {
+            "modes": [],
+            "landing_distance": [],
+            "advantage": [],
+            "chosen_q": [],
+            "candidate_mean_q": [],
+            "chosen_best": [],
+        }
+        skipped = 0
+        if not self.use_shot_cf:
+            self._last_shot_cf_stats = {"computed_rate": 0.0, "computed_count": 0.0}
+            return (
+                th.as_tensor(advantages_np, dtype=current_obs_tensor.dtype, device=current_obs_tensor.device),
+                th.as_tensor(mask_np, dtype=current_obs_tensor.dtype, device=current_obs_tensor.device),
+            )
+
+        obs_rows_for_value: list[np.ndarray] = []
+        jobs: list[dict[str, object]] = []
+        with th.no_grad():
+            features = self.policy.extract_features(current_obs_tensor)
+            if self.policy.share_features_extractor:
+                latent_pi, _ = self.policy.mlp_extractor(features)
+            else:
+                pi_features, _ = features
+                latent_pi = self.policy.mlp_extractor.forward_actor(pi_features)
+
+            for index, info in enumerate(infos):
+                if index >= base.shape[0] or not bool(info.get("shot_cf_action", False)):
+                    continue
+                record = info.get("last_record")
+                if not isinstance(record, StageRecord):
+                    skipped += 1
+                    continue
+                candidates, chosen_candidate = self._shot_cf_candidate_actions_for_row(
+                    current_obs_tensor[index],
+                    latent_pi[index],
+                    int(base[index].item()),
+                    train_side=str(info.get("train_side", "left")),
+                    top_m=self.shot_cf_top_m,
+                )
+                selection = select_diverse_shot_candidates(
+                    candidates,
+                    chosen_candidate=chosen_candidate,
+                    num_modes=self.shot_cf_num_modes,
+                    min_landing_dist=self.shot_cf_min_landing_dist,
+                    include_chosen=self.shot_cf_include_chosen,
+                    skip_low_diversity=self.shot_cf_skip_low_diversity,
+                    min_modes=self.shot_cf_min_modes,
+                )
+                if selection.skipped:
+                    skipped += 1
+                    continue
+                observations, score_targets = self._shot_cf_value_inputs_for_selection(selection, info)
+                if len(observations) != len(selection.candidates):
+                    skipped += 1
+                    continue
+                value_offsets: list[int] = []
+                for observation in observations:
+                    if observation is None:
+                        value_offsets.append(-1)
+                    else:
+                        value_offsets.append(len(obs_rows_for_value))
+                        obs_rows_for_value.append(observation)
+                jobs.append(
+                    {
+                        "index": index,
+                        "info": info,
+                        "selection": selection,
+                        "targets": score_targets,
+                        "value_offsets": value_offsets,
+                    }
+                )
+
+            if obs_rows_for_value:
+                value_obs = np.asarray(obs_rows_for_value, dtype=np.float32)
+                values_np = (
+                    self.policy.predict_values(obs_as_tensor(value_obs, self.device))
+                    .flatten()
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
+                )
+            else:
+                values_np = np.asarray([], dtype=np.float32)
+
+        for job in jobs:
+            index = int(job["index"])
+            selection = job["selection"]
+            targets = np.asarray(job["targets"], dtype=np.float32)
+            value_offsets = list(job["value_offsets"])
+            scores = targets.copy()
+            for score_index, value_offset in enumerate(value_offsets):
+                if value_offset >= 0:
+                    scores[score_index] = float(self.gamma) * float(values_np[value_offset])
+            if (
+                selection.chosen_index < 0
+                or selection.chosen_index >= scores.shape[0]
+                or scores.shape[0] < max(int(self.shot_cf_min_modes), 1)
+                or not np.all(np.isfinite(scores))
+            ):
+                skipped += 1
+                continue
+            chosen_score = float(scores[selection.chosen_index])
+            candidate_mean = float(np.mean(scores))
+            advantage = float(chosen_score - candidate_mean)
+            advantages_np[index] = advantage
+            mask_np[index] = 1.0
+            stats["modes"].append(float(len(selection.candidates)))
+            stats["landing_distance"].append(float(selection.mean_landing_distance))
+            stats["advantage"].append(advantage)
+            stats["chosen_q"].append(chosen_score)
+            stats["candidate_mean_q"].append(candidate_mean)
+            stats["chosen_best"].append(float(chosen_score >= float(np.max(scores)) - 1e-8))
+            if self.shot_cf_debug_log:
+                info = job["info"]
+                assert isinstance(info, dict)
+                info["shot_cf_debug"] = {
+                    "chosen_index": int(selection.chosen_index),
+                    "scores": scores.astype(float).tolist(),
+                    "candidate_landings": [
+                        (float(candidate.landing_x), float(candidate.landing_y))
+                        for candidate in selection.candidates
+                    ],
+                }
+
+        computed_count = int(np.count_nonzero(mask_np > 0.5))
+        total_count = int(base.shape[0])
+        self._last_shot_cf_stats = {
+            "computed_rate": float(computed_count / max(total_count, 1)),
+            "computed_count": float(computed_count),
+            "skipped_count": float(skipped),
+        }
+        for key, values in stats.items():
+            arr = np.asarray(values, dtype=np.float32)
+            if arr.size:
+                self._last_shot_cf_stats[f"{key}_mean"] = float(np.mean(arr))
+                self._last_shot_cf_stats[f"{key}_std"] = float(np.std(arr))
+            else:
+                self._last_shot_cf_stats[f"{key}_mean"] = 0.0
+                self._last_shot_cf_stats[f"{key}_std"] = 0.0
+
+        # Rollout buffers are NumPy-backed, so even when shot_cf_value_detach is
+        # false there is no differentiable simulator path here. Keep the flag for
+        # config compatibility while using detached critic targets by default.
+        return (
+            th.as_tensor(advantages_np, dtype=current_obs_tensor.dtype, device=current_obs_tensor.device),
+            th.as_tensor(mask_np, dtype=current_obs_tensor.dtype, device=current_obs_tensor.device),
+        )
+
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -814,19 +1331,35 @@ class RecoveryFactorizedPPO(PPO):
                         terminal_value = self.policy.predict_values(terminal_obs)[0]
                     rewards[idx] += self.gamma * terminal_value
 
-            (
-                recovery_advantage,
-                recovery_loss_mask,
-                recovery_distribution_target,
-                recovery_distribution_mask,
-            ) = self._recovery_advantage_from_transitions(
-                values,
-                infos,
-                new_obs,
-                rewards,
-                dones,
+            if self.use_recovery_factorized_advantage:
+                (
+                    recovery_advantage,
+                    recovery_loss_mask,
+                    recovery_distribution_target,
+                    recovery_distribution_mask,
+                ) = self._recovery_advantage_from_transitions(
+                    values,
+                    infos,
+                    new_obs,
+                    rewards,
+                    dones,
+                    obs_tensor,
+                    action_tensor_for_diagnostics,
+                )
+            else:
+                recovery_advantage = th.zeros_like(log_probs)
+                recovery_loss_mask = th.zeros_like(log_probs)
+                recovery_bin_count = max(int(getattr(self.policy, "_conditional_recovery_count", 0)), 0)
+                recovery_distribution_target = th.zeros(
+                    (env.num_envs, recovery_bin_count),
+                    dtype=log_probs.dtype,
+                    device=log_probs.device,
+                )
+                recovery_distribution_mask = th.zeros_like(recovery_distribution_target)
+            shot_cf_advantage, shot_cf_loss_mask = self._shot_cf_advantage_from_transitions(
                 obs_tensor,
                 action_tensor_for_diagnostics,
+                infos,
             )
             callback.update_locals(locals())
             if not callback.on_step():
@@ -844,6 +1377,8 @@ class RecoveryFactorizedPPO(PPO):
                 recovery_loss_mask=recovery_loss_mask,
                 recovery_distribution_target=recovery_distribution_target,
                 recovery_distribution_mask=recovery_distribution_mask,
+                shot_cf_advantage=shot_cf_advantage,
+                shot_cf_loss_mask=shot_cf_loss_mask,
             )
             self._last_obs = new_obs
             self._last_episode_starts = dones
@@ -898,6 +1433,17 @@ class RecoveryFactorizedPPO(PPO):
             recovery_advantage_abs_mean = 0.0
             recovery_advantage_min = 0.0
             recovery_advantage_max = 0.0
+        shot_cf_mask_np = self.rollout_buffer.shot_cf_loss_mask.flatten()
+        shot_cf_advantage_np = self.rollout_buffer.shot_cf_advantages.flatten()
+        active_shot_cf_advantages = shot_cf_advantage_np[shot_cf_mask_np > 0.5]
+        shot_cf_mask_rate = float(np.mean(shot_cf_mask_np > 0.5)) if shot_cf_mask_np.size else 0.0
+        shot_cf_mask_count = int(active_shot_cf_advantages.size)
+        if shot_cf_mask_count > 0:
+            shot_cf_advantage_mean = float(np.mean(active_shot_cf_advantages))
+            shot_cf_advantage_std = float(np.std(active_shot_cf_advantages))
+        else:
+            shot_cf_advantage_mean = 0.0
+            shot_cf_advantage_std = 0.0
 
         entropy_losses = []
         pg_losses, value_losses = [], []
@@ -925,9 +1471,14 @@ class RecoveryFactorizedPPO(PPO):
                 if self.normalize_advantage and len(advantages) > 1:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
+                shot_cf_advantages = self._normalize_shot_cf_advantage(
+                    rollout_data.shot_cf_advantages,
+                    rollout_data.shot_cf_loss_mask,
+                )
+                shot_advantages = advantages + self.shot_cf_coef * shot_cf_advantages
                 shot_ratio = th.exp(log_prob_shot - rollout_data.old_log_prob_shot)
-                shot_loss_1 = advantages * shot_ratio
-                shot_loss_2 = advantages * th.clamp(shot_ratio, 1 - clip_range, 1 + clip_range)
+                shot_loss_1 = shot_advantages * shot_ratio
+                shot_loss_2 = shot_advantages * th.clamp(shot_ratio, 1 - clip_range, 1 + clip_range)
                 loss_shot = -th.min(shot_loss_1, shot_loss_2).mean()
 
                 recovery_advantages = self._normalize_recovery_advantage(
@@ -1029,6 +1580,12 @@ class RecoveryFactorizedPPO(PPO):
         self.logger.record("train/recovery_advantage_abs_mean", recovery_advantage_abs_mean)
         self.logger.record("train/recovery_advantage_min", recovery_advantage_min)
         self.logger.record("train/recovery_advantage_max", recovery_advantage_max)
+        self.logger.record("train/shot_cf_mask_rate", shot_cf_mask_rate)
+        self.logger.record("train/shot_cf_mask_count", shot_cf_mask_count)
+        self.logger.record("train/shot_cf_advantage_mean", shot_cf_advantage_mean)
+        self.logger.record("train/shot_cf_advantage_std", shot_cf_advantage_std)
+        for key, value in self._last_shot_cf_stats.items():
+            self.logger.record(f"train/shot_cf_{key}", value)
         self.logger.record("train/loss", loss.item())
         self.logger.record("train/explained_variance", explained_var)
         if hasattr(self.policy, "log_std"):

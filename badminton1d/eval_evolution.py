@@ -15,7 +15,7 @@ from stable_baselines3 import PPO
 
 from badminton1d.action_space import DiscreteActionConfig
 from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
-from badminton1d.evaluation import ModelSelector, adapt_observation_to_model, rollout_episode
+from badminton1d.evaluation import ModelSelector, adapt_observation_to_model, rollout_episode, summarize_episodes
 from badminton1d.factorized_ppo import RecoveryFactorizedPPO
 from badminton1d.mpl_config import ensure_writable_matplotlib_config
 from badminton1d.playback import MatchTrace, RallyTrace, build_rally_trace
@@ -82,6 +82,7 @@ class PoolAgentSpec:
 class EvaluatedMatch:
     trace: MatchTrace
     recovery_diagnostics: list[dict[str, Any]]
+    episode_summary: dict[str, Any]
 
 
 def load_run_config(run_dir: Path) -> dict[str, Any]:
@@ -375,6 +376,7 @@ def rollout_anchor_match_trace(
     )
     rallies: list[RallyTrace] = []
     recovery_diagnostics: list[dict[str, Any]] = []
+    results: list[dict[str, object]] = []
     score_left = 0
     score_right = 0
     for episode in range(episodes):
@@ -396,6 +398,7 @@ def rollout_anchor_match_trace(
         records = result["records"]
         assert isinstance(records, list)
         trace = build_rally_trace(records, sim_config)
+        results.append(result)
         rallies.append(
             RallyTrace(
                 stages=trace.stages,
@@ -423,6 +426,7 @@ def rollout_anchor_match_trace(
             total_playback_time=sum(rally.total_playback_time for rally in rallies),
         ),
         recovery_diagnostics=recovery_diagnostics,
+        episode_summary=summarize_episodes(results),
     )
 
 
@@ -474,6 +478,7 @@ def rollout_fixed_pool_match_trace(
     )
     rallies: list[RallyTrace] = []
     recovery_diagnostics: list[dict[str, Any]] = []
+    results: list[dict[str, object]] = []
     score_left = 0
     score_right = 0
     for episode in range(episodes):
@@ -495,6 +500,7 @@ def rollout_fixed_pool_match_trace(
         records = result["records"]
         assert isinstance(records, list)
         trace = build_rally_trace(records, sim_config)
+        results.append(result)
         rallies.append(
             RallyTrace(
                 stages=trace.stages,
@@ -522,6 +528,7 @@ def rollout_fixed_pool_match_trace(
             total_playback_time=sum(rally.total_playback_time for rally in rallies),
         ),
         recovery_diagnostics=recovery_diagnostics,
+        episode_summary=summarize_episodes(results),
     )
 
 

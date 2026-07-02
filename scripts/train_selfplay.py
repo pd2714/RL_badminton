@@ -155,11 +155,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-interval", type=int, default=10)
     parser.add_argument("--save-interval", type=int, default=2000)
     parser.add_argument("--pool-size", type=int, default=6)
-    parser.add_argument("--opponent-sampling-mode", choices=("uniform", "random", "recency", "newest"), default="recency")
+    parser.add_argument(
+        "--opponent-sampling-mode",
+        choices=("uniform", "random", "recency", "newest", "variety"),
+        default="recency",
+    )
     parser.add_argument("--checkpoint-recency-power", type=float, default=3.0)
     parser.add_argument("--recent-opponent-weight", type=float, default=0.9)
     parser.add_argument("--older-opponent-weight", type=float, default=0.1)
     parser.add_argument("--heuristic-opponent-prob", type=float, default=0.05)
+    parser.add_argument("--historical-anchor-dir", type=Path, default=None)
+    parser.add_argument("--historical-anchor-pool-size", type=int, default=1000)
+    parser.add_argument("--historical-anchor-weight", type=float, default=0.70)
+    parser.add_argument("--recent-continuation-weight", type=float, default=0.15)
+    parser.add_argument("--newest-continuation-weight", type=float, default=0.05)
     parser.add_argument(
         "--curriculum",
         choices=("none", *available_training_curricula()),
@@ -222,6 +231,18 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument("--recovery-full-diagnostics-probability", type=float, default=0.0)
+    parser.add_argument("--use-shot-cf", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--shot-cf-coef", type=float, default=0.1)
+    parser.add_argument("--shot-cf-top-m", type=int, default=20)
+    parser.add_argument("--shot-cf-num-modes", type=int, default=3)
+    parser.add_argument("--shot-cf-min-landing-dist", type=float, default=1.0)
+    parser.add_argument("--shot-cf-depth", type=int, default=1)
+    parser.add_argument("--shot-cf-include-chosen", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--shot-cf-skip-low-diversity", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--shot-cf-min-modes", type=int, default=2)
+    parser.add_argument("--shot-cf-value-detach", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--shot-cf-normalize", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--shot-cf-debug-log", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--opponent-travel-reward-weight", type=float, default=0.0)
     parser.add_argument("--return-depth-reward-weight", type=float, default=0.0)
     parser.add_argument("--net-proximity-reward-weight", type=float, default=0.0)
@@ -397,6 +418,18 @@ def create_compatible_base_checkpoint(
             counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
             recovery_counterfactual_expected_response_target=args.recovery_counterfactual_expected_response_target,
             recovery_full_diagnostics_probability=args.recovery_full_diagnostics_probability,
+            use_shot_cf=args.use_shot_cf,
+            shot_cf_coef=args.shot_cf_coef,
+            shot_cf_top_m=args.shot_cf_top_m,
+            shot_cf_num_modes=args.shot_cf_num_modes,
+            shot_cf_min_landing_dist=args.shot_cf_min_landing_dist,
+            shot_cf_depth=args.shot_cf_depth,
+            shot_cf_include_chosen=args.shot_cf_include_chosen,
+            shot_cf_skip_low_diversity=args.shot_cf_skip_low_diversity,
+            shot_cf_min_modes=args.shot_cf_min_modes,
+            shot_cf_value_detach=args.shot_cf_value_detach,
+            shot_cf_normalize=args.shot_cf_normalize,
+            shot_cf_debug_log=args.shot_cf_debug_log,
         ),
         discrete_action_config=discrete_action_config,
         opponent=make_opponent("safe", seed=args.seed + 700_000),
@@ -451,6 +484,20 @@ def main() -> None:
         raise ValueError("--log-interval must be positive")
     if args.n_epochs <= 0:
         raise ValueError("--n-epochs must be positive")
+    if args.opponent_sampling_mode == "variety" and args.historical_anchor_dir is None:
+        raise ValueError("--opponent-sampling-mode variety requires --historical-anchor-dir")
+    if args.historical_anchor_dir is not None and not args.historical_anchor_dir.exists():
+        raise FileNotFoundError(f"Historical anchor dir not found: {args.historical_anchor_dir}")
+    if args.historical_anchor_pool_size <= 0:
+        raise ValueError("--historical-anchor-pool-size must be positive")
+    if args.heuristic_opponent_prob < 0.0:
+        raise ValueError("--heuristic-opponent-prob must be zero or greater")
+    if args.historical_anchor_weight < 0.0:
+        raise ValueError("--historical-anchor-weight must be zero or greater")
+    if args.recent_continuation_weight < 0.0:
+        raise ValueError("--recent-continuation-weight must be zero or greater")
+    if args.newest_continuation_weight < 0.0:
+        raise ValueError("--newest-continuation-weight must be zero or greater")
     if not 0.0 <= args.mirror_match_fraction <= 1.0:
         raise ValueError("--mirror-match-fraction must be in [0, 1]")
     if args.progress_video_fps <= 0:
@@ -485,6 +532,18 @@ def main() -> None:
         raise ValueError("--counterfactual-opponent-response-samples must be positive")
     if not 0.0 <= args.recovery_full_diagnostics_probability <= 1.0:
         raise ValueError("--recovery-full-diagnostics-probability must be in [0, 1]")
+    if args.shot_cf_coef < 0.0:
+        raise ValueError("--shot-cf-coef must be zero or greater")
+    if args.shot_cf_top_m <= 0:
+        raise ValueError("--shot-cf-top-m must be positive")
+    if args.shot_cf_num_modes <= 0:
+        raise ValueError("--shot-cf-num-modes must be positive")
+    if args.shot_cf_min_landing_dist < 0.0:
+        raise ValueError("--shot-cf-min-landing-dist must be non-negative")
+    if args.shot_cf_depth != 1:
+        raise ValueError("Only --shot-cf-depth 1 is implemented")
+    if args.shot_cf_min_modes <= 0:
+        raise ValueError("--shot-cf-min-modes must be positive")
 
     run_dir = args.output_dir
     checkpoint_dir = run_dir / "checkpoint_pool"
@@ -582,11 +641,12 @@ def main() -> None:
         reward_config=reward_config,
         reset_sampling_config=reset_sampling_config,
     )
+    checkpoint_sampling_mode = "recency" if args.opponent_sampling_mode == "variety" else args.opponent_sampling_mode
     train_pool = CheckpointPool(
         checkpoint_dir=checkpoint_dir,
         base_checkpoint_path=effective_base_checkpoint_path,
         pool_size=args.pool_size,
-        sampling_mode=args.opponent_sampling_mode,
+        sampling_mode=checkpoint_sampling_mode,
         recency_power=args.checkpoint_recency_power,
         recent_fraction=0.5,
         seed=args.seed + 1,
@@ -619,10 +679,21 @@ def main() -> None:
                 checkpoint_dir=checkpoint_dir,
                 base_checkpoint_path=effective_base_checkpoint_path,
                 pool_size=args.pool_size,
-                sampling_mode=args.opponent_sampling_mode,
+                sampling_mode=checkpoint_sampling_mode,
                 recency_power=args.checkpoint_recency_power,
                 recent_fraction=0.5,
                 seed=args.seed + 2 + (1 if include_records else 0),
+            ),
+            historical_anchor_pool=(
+                CheckpointPool(
+                    checkpoint_dir=args.historical_anchor_dir,
+                    pool_size=args.historical_anchor_pool_size,
+                    sampling_mode="linear_recency",
+                    seed=args.seed + 102 + (1 if include_records else 0),
+                    max_cached_models=1,
+                )
+                if args.opponent_sampling_mode == "variety" and args.historical_anchor_dir is not None
+                else None
             ),
             sim_config=sim_config,
             discrete_action_config=discrete_action_config,
@@ -631,6 +702,15 @@ def main() -> None:
             heuristic_opponent_prob=args.heuristic_opponent_prob,
             recent_weight=args.recent_opponent_weight,
             older_weight=args.older_opponent_weight,
+            historical_anchor_weight=(
+                args.historical_anchor_weight if args.opponent_sampling_mode == "variety" else 0.0
+            ),
+            recent_continuation_weight=(
+                args.recent_continuation_weight if args.opponent_sampling_mode == "variety" else 0.0
+            ),
+            newest_continuation_weight=(
+                args.newest_continuation_weight if args.opponent_sampling_mode == "variety" else 0.0
+            ),
             deterministic=False,
         )
 
@@ -657,6 +737,18 @@ def main() -> None:
             counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
             recovery_counterfactual_expected_response_target=args.recovery_counterfactual_expected_response_target,
             recovery_full_diagnostics_probability=args.recovery_full_diagnostics_probability,
+            use_shot_cf=args.use_shot_cf,
+            shot_cf_coef=args.shot_cf_coef,
+            shot_cf_top_m=args.shot_cf_top_m,
+            shot_cf_num_modes=args.shot_cf_num_modes,
+            shot_cf_min_landing_dist=args.shot_cf_min_landing_dist,
+            shot_cf_depth=args.shot_cf_depth,
+            shot_cf_include_chosen=args.shot_cf_include_chosen,
+            shot_cf_skip_low_diversity=args.shot_cf_skip_low_diversity,
+            shot_cf_min_modes=args.shot_cf_min_modes,
+            shot_cf_value_detach=args.shot_cf_value_detach,
+            shot_cf_normalize=args.shot_cf_normalize,
+            shot_cf_debug_log=args.shot_cf_debug_log,
         )
 
     def monitored_factory() -> Monitor:
@@ -670,95 +762,28 @@ def main() -> None:
         vec_env_cls=vec_env_cls,
     )
 
-    progress_newest_env = build_selfplay_env(
-        train_side=args.train_side,
-        mirror_train_side=args.mirror_sides,
-        mirror_match_fraction=args.mirror_match_fraction,
-        initial_server=effective_initial_server,
-        random_service_x=args.random_service_x,
-        sim_config=sim_config,
-        train_reaction_time=args.reaction_time,
-        opponent_reaction_time=args.reaction_time,
-        max_stages_per_rally=args.max_rally_stages,
-        reward_config=reward_config,
-        reset_sampling_config=reset_sampling_config,
-        seed=args.seed + 50_000,
-        discrete_action_config=discrete_action_config,
-        opponent=(
-            build_fixed_checkpoint_opponent(
-                checkpoint_path=curriculum.opponent_checkpoint_path,
-                sim_config=sim_config,
-                discrete_action_config=discrete_action_config,
-                policy_type=args.policy_type,
-                tactic_runtime_config=tactic_runtime_config,
-                seed=args.seed + 50_001,
-                deterministic=args.progress_video_deterministic,
-                hitter_deterministic=curriculum.opponent_hitter_deterministic,
-                receiver_deterministic=curriculum.opponent_receiver_deterministic,
-            )
-            if curriculum is not None
-            else FrozenCheckpointOpponent(
-                pool=CheckpointPool(
-                    checkpoint_dir=checkpoint_dir,
-                    base_checkpoint_path=effective_base_checkpoint_path,
-                    pool_size=args.pool_size,
-                    sampling_mode="newest",
-                    recency_power=args.checkpoint_recency_power,
-                    recent_fraction=0.5,
-                    seed=args.seed + 50_001,
-                ),
-                sim_config=sim_config,
-                discrete_action_config=discrete_action_config,
-                policy_type=args.policy_type,
-                tactic_runtime_config=tactic_runtime_config,
-                deterministic=args.progress_video_deterministic,
-            )
-        ),
-        include_records_in_info=True,
-        recovery_counterfactual_other_sample_count=0,
-        counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
-        recovery_counterfactual_expected_response_target=False,
-        recovery_full_diagnostics_probability=0.0,
-    )
-    progress_mirror_env = build_selfplay_env(
-        train_side=args.train_side,
-        mirror_train_side=args.mirror_sides,
-        mirror_match_fraction=args.mirror_match_fraction,
-        initial_server=effective_initial_server,
-        random_service_x=args.random_service_x,
-        sim_config=sim_config,
-        train_reaction_time=args.reaction_time,
-        opponent_reaction_time=args.reaction_time,
-        max_stages_per_rally=args.max_rally_stages,
-        reward_config=reward_config,
-        reset_sampling_config=reset_sampling_config,
-        seed=args.seed + 60_000,
-        discrete_action_config=discrete_action_config,
-        opponent=LiveModelOpponent(
-            sim_config=sim_config,
-            discrete_action_config=discrete_action_config,
-            policy_type=args.policy_type,
-            tactic_runtime_config=tactic_runtime_config,
-            deterministic=args.progress_video_deterministic,
-            label_name="mirror_self",
-        ),
-        include_records_in_info=True,
-        recovery_counterfactual_other_sample_count=0,
-        counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
-        recovery_counterfactual_expected_response_target=False,
-        recovery_full_diagnostics_probability=0.0,
-    )
-
-    ppo_class = RecoveryFactorizedPPO if args.use_recovery_factorized_advantage else PPO
+    ppo_class = RecoveryFactorizedPPO if args.use_recovery_factorized_advantage or args.use_shot_cf else PPO
     ppo_extra_kwargs = (
         {
-            "use_recovery_factorized_advantage": True,
+            "use_recovery_factorized_advantage": args.use_recovery_factorized_advantage,
             "recovery_counterfactual_baseline": args.recovery_counterfactual_baseline,
             "recovery_counterfactual_advantage_coef": args.recovery_counterfactual_advantage_coef,
             "recovery_counterfactual_distribution_coef": args.recovery_counterfactual_distribution_coef,
             "recovery_counterfactual_distribution_temperature": args.recovery_counterfactual_distribution_temperature,
+            "use_shot_cf": args.use_shot_cf,
+            "shot_cf_coef": args.shot_cf_coef,
+            "shot_cf_top_m": args.shot_cf_top_m,
+            "shot_cf_num_modes": args.shot_cf_num_modes,
+            "shot_cf_min_landing_dist": args.shot_cf_min_landing_dist,
+            "shot_cf_depth": args.shot_cf_depth,
+            "shot_cf_include_chosen": args.shot_cf_include_chosen,
+            "shot_cf_skip_low_diversity": args.shot_cf_skip_low_diversity,
+            "shot_cf_min_modes": args.shot_cf_min_modes,
+            "shot_cf_value_detach": args.shot_cf_value_detach,
+            "shot_cf_normalize": args.shot_cf_normalize,
+            "shot_cf_debug_log": args.shot_cf_debug_log,
         }
-        if args.use_recovery_factorized_advantage
+        if args.use_recovery_factorized_advantage or args.use_shot_cf
         else {}
     )
     model = ppo_class(
@@ -833,6 +858,56 @@ def main() -> None:
     )
     callbacks_list.extend([checkpoint_callback, eval_callback])
     if args.progress_video_freq > 0:
+        progress_newest_env = build_selfplay_env(
+            train_side=args.train_side,
+            mirror_train_side=args.mirror_sides,
+            mirror_match_fraction=args.mirror_match_fraction,
+            initial_server=effective_initial_server,
+            random_service_x=args.random_service_x,
+            sim_config=sim_config,
+            train_reaction_time=args.reaction_time,
+            opponent_reaction_time=args.reaction_time,
+            max_stages_per_rally=args.max_rally_stages,
+            reward_config=reward_config,
+            reset_sampling_config=reset_sampling_config,
+            seed=args.seed + 50_000,
+            discrete_action_config=discrete_action_config,
+            opponent=(
+                build_fixed_checkpoint_opponent(
+                    checkpoint_path=curriculum.opponent_checkpoint_path,
+                    sim_config=sim_config,
+                    discrete_action_config=discrete_action_config,
+                    policy_type=args.policy_type,
+                    tactic_runtime_config=tactic_runtime_config,
+                    seed=args.seed + 50_001,
+                    deterministic=args.progress_video_deterministic,
+                    hitter_deterministic=curriculum.opponent_hitter_deterministic,
+                    receiver_deterministic=curriculum.opponent_receiver_deterministic,
+                )
+                if curriculum is not None
+                else FrozenCheckpointOpponent(
+                    pool=CheckpointPool(
+                        checkpoint_dir=checkpoint_dir,
+                        base_checkpoint_path=effective_base_checkpoint_path,
+                        pool_size=args.pool_size,
+                        sampling_mode="newest",
+                        recency_power=args.checkpoint_recency_power,
+                        recent_fraction=0.5,
+                        seed=args.seed + 50_001,
+                    ),
+                    sim_config=sim_config,
+                    discrete_action_config=discrete_action_config,
+                    policy_type=args.policy_type,
+                    tactic_runtime_config=tactic_runtime_config,
+                    deterministic=args.progress_video_deterministic,
+                )
+            ),
+            include_records_in_info=True,
+            recovery_counterfactual_other_sample_count=0,
+            counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
+            recovery_counterfactual_expected_response_target=False,
+            recovery_full_diagnostics_probability=0.0,
+        )
         callbacks_list.append(
             SelfPlayProgressVideoCallback(
                 sample_env=progress_newest_env,
@@ -853,6 +928,34 @@ def main() -> None:
             )
         )
         if args.progress_video_matchups == "newest-and-mirror":
+            progress_mirror_env = build_selfplay_env(
+                train_side=args.train_side,
+                mirror_train_side=args.mirror_sides,
+                mirror_match_fraction=args.mirror_match_fraction,
+                initial_server=effective_initial_server,
+                random_service_x=args.random_service_x,
+                sim_config=sim_config,
+                train_reaction_time=args.reaction_time,
+                opponent_reaction_time=args.reaction_time,
+                max_stages_per_rally=args.max_rally_stages,
+                reward_config=reward_config,
+                reset_sampling_config=reset_sampling_config,
+                seed=args.seed + 60_000,
+                discrete_action_config=discrete_action_config,
+                opponent=LiveModelOpponent(
+                    sim_config=sim_config,
+                    discrete_action_config=discrete_action_config,
+                    policy_type=args.policy_type,
+                    tactic_runtime_config=tactic_runtime_config,
+                    deterministic=args.progress_video_deterministic,
+                    label_name="mirror_self",
+                ),
+                include_records_in_info=True,
+                recovery_counterfactual_other_sample_count=0,
+                counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
+                recovery_counterfactual_expected_response_target=False,
+                recovery_full_diagnostics_probability=0.0,
+            )
             callbacks_list.append(
                 SelfPlayProgressVideoCallback(
                     sample_env=progress_mirror_env,
@@ -911,6 +1014,11 @@ def main() -> None:
         "opponent_sampling_mode": args.opponent_sampling_mode,
         "checkpoint_recency_power": args.checkpoint_recency_power,
         "heuristic_opponent_prob": args.heuristic_opponent_prob,
+        "historical_anchor_dir": None if args.historical_anchor_dir is None else str(args.historical_anchor_dir),
+        "historical_anchor_pool_size": args.historical_anchor_pool_size,
+        "historical_anchor_weight": args.historical_anchor_weight,
+        "recent_continuation_weight": args.recent_continuation_weight,
+        "newest_continuation_weight": args.newest_continuation_weight,
         "curriculum": None if curriculum is None else curriculum.name,
         "curriculum_description": None if curriculum is None else curriculum.description,
         "curriculum_opponent_checkpoint": None if curriculum is None else str(curriculum.opponent_checkpoint_path),
@@ -981,6 +1089,18 @@ def main() -> None:
         "counterfactual_opponent_response_samples": args.counterfactual_opponent_response_samples,
         "recovery_counterfactual_expected_response_target": args.recovery_counterfactual_expected_response_target,
         "recovery_full_diagnostics_probability": args.recovery_full_diagnostics_probability,
+        "use_shot_cf": args.use_shot_cf,
+        "shot_cf_coef": args.shot_cf_coef,
+        "shot_cf_top_m": args.shot_cf_top_m,
+        "shot_cf_num_modes": args.shot_cf_num_modes,
+        "shot_cf_min_landing_dist": args.shot_cf_min_landing_dist,
+        "shot_cf_depth": args.shot_cf_depth,
+        "shot_cf_include_chosen": args.shot_cf_include_chosen,
+        "shot_cf_skip_low_diversity": args.shot_cf_skip_low_diversity,
+        "shot_cf_min_modes": args.shot_cf_min_modes,
+        "shot_cf_value_detach": args.shot_cf_value_detach,
+        "shot_cf_normalize": args.shot_cf_normalize,
+        "shot_cf_debug_log": args.shot_cf_debug_log,
         "opponent_travel_reward_weight": args.opponent_travel_reward_weight,
         "return_depth_reward_weight": args.return_depth_reward_weight,
         "net_proximity_reward_weight": args.net_proximity_reward_weight,

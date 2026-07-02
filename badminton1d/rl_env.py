@@ -114,6 +114,18 @@ class RLEnvConfig:
     counterfactual_opponent_response_samples: int = COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES
     recovery_counterfactual_expected_response_target: bool = True
     recovery_full_diagnostics_probability: float = 0.0
+    use_shot_cf: bool = False
+    shot_cf_coef: float = 0.1
+    shot_cf_top_m: int = 20
+    shot_cf_num_modes: int = 3
+    shot_cf_min_landing_dist: float = 1.0
+    shot_cf_depth: int = 1
+    shot_cf_include_chosen: bool = True
+    shot_cf_skip_low_diversity: bool = True
+    shot_cf_min_modes: int = 2
+    shot_cf_value_detach: bool = True
+    shot_cf_normalize: bool = True
+    shot_cf_debug_log: bool = False
 
 
 class BadmintonRLEnv(gym.Env[np.ndarray, int]):
@@ -613,11 +625,15 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
             "role": self.role,
             "server": self.current_server,
             "train_side": self.train_side,
+            "score_left": int(self.score.left),
+            "score_right": int(self.score.right),
             "opponent_label": self.opponent.label() if hasattr(self.opponent, "label") else self.rl_config.opponent_type,
             "feasible_indices": list(self.pending_feasible_indices),
             "randomized_start": self._episode_random_start,
             "service_x_side": self._episode_service_x_side,
             "policy_type": self.action_mapper.policy_type,
+            "include_feasible_mask": bool(self.rl_config.include_feasible_mask),
+            "include_reaction_risk_features": bool(self.rl_config.include_reaction_risk_features),
         }
 
     def _get_obs(self) -> np.ndarray:
@@ -646,12 +662,30 @@ class BadmintonRLEnv(gym.Env[np.ndarray, int]):
             return {}
 
         payload: dict[str, Any] = {"recovery_factorized_action": True}
+        if self.rl_config.use_shot_cf:
+            payload.update(self._shot_counterfactual_info(record, terminated=terminated))
         if terminated:
             payload["recovery_factorized_target"] = float(self._terminal_reward(record.next_state.winner))
         elif self.role == "receiver" and not self.pending_feasible_indices:
             payload["recovery_factorized_target"] = float(self.rl_config.reward.loss_reward)
             payload["recovery_factorized_no_feasible_intercept"] = True
         payload.update(self._recovery_counterfactual_info(record))
+        return payload
+
+    def _shot_counterfactual_info(self, record: StageRecord, *, terminated: bool) -> dict[str, Any]:
+        if record.state_before.current_hitter != self.train_side:
+            return {}
+        payload: dict[str, Any] = {
+            "shot_cf_action": True,
+            "shot_cf_win_reward": float(self.rl_config.reward.win_reward),
+            "shot_cf_loss_reward": float(self.rl_config.reward.loss_reward),
+            "shot_cf_depth": int(self.rl_config.shot_cf_depth),
+        }
+        # PPO chooses diverse counterfactual shots from the live policy. The env
+        # supplies the sampled opponent response context, so PPO can evaluate an
+        # experimental one-response bootstrap without mutating this environment.
+        if not terminated and self.role == "receiver" and self.pending_applied_action is not None:
+            payload["shot_cf_opponent_response_action"] = self.pending_applied_action
         return payload
 
     def _recovery_counterfactual_info(self, record: StageRecord) -> dict[str, Any]:

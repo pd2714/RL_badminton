@@ -664,8 +664,69 @@ def _choose_likely_opponent_shots(
     except (RuntimeError, ValueError) as error:
         return [OpponentShotPlan(action_flat_index=None, action=None, landing=None, probability=1.0, error=str(error))]
 
+    plans = _valid_opponent_shot_plans(
+        mapper=mapper,
+        state_after_fixed_shot=state_after_fixed_shot,
+        opponent=opponent,
+        config=config,
+        action_probabilities=action_probabilities,
+        count=count,
+    )
+    if len(plans) < int(count) and len(action_probabilities) < int(mapper.hitter_action_count):
+        tried = {int(flat_action) for flat_action, _ in action_probabilities}
+        fallback_probabilities = _top_hitter_action_probabilities(
+            model,
+            observation,
+            hitter_action_count=mapper.hitter_action_count,
+            count=int(mapper.hitter_action_count),
+        )
+        fallback_plans = _valid_opponent_shot_plans(
+            mapper=mapper,
+            state_after_fixed_shot=state_after_fixed_shot,
+            opponent=opponent,
+            config=config,
+            action_probabilities=fallback_probabilities,
+            count=max(int(count) - len(plans), 0),
+            skip_flat_actions=tried,
+            require_receiver_feasible=True,
+        )
+        if not fallback_plans:
+            fallback_plans = _valid_opponent_shot_plans(
+                mapper=mapper,
+                state_after_fixed_shot=state_after_fixed_shot,
+                opponent=opponent,
+                config=config,
+                action_probabilities=fallback_probabilities,
+                count=max(int(count) - len(plans), 0),
+                skip_flat_actions=tried,
+            )
+        plans.extend(fallback_plans)
+
+    total_probability = float(sum(max(float(plan.probability), 0.0) for plan in plans))
+    if plans and total_probability > 0.0 and np.isfinite(total_probability):
+        plans = [
+            replace(plan, probability=max(float(plan.probability), 0.0) / total_probability)
+            for plan in plans
+        ]
+    return plans
+
+
+def _valid_opponent_shot_plans(
+    *,
+    mapper: DiscreteActionMapper,
+    state_after_fixed_shot: StageState,
+    opponent: Side,
+    config: Any,
+    action_probabilities: list[tuple[int, float]],
+    count: int,
+    skip_flat_actions: set[int] | None = None,
+    require_receiver_feasible: bool = False,
+) -> list[OpponentShotPlan]:
     plans: list[OpponentShotPlan] = []
+    skip_flat_actions = skip_flat_actions or set()
     for flat_action, probability in action_probabilities:
+        if int(flat_action) in skip_flat_actions:
+            continue
         try:
             decoded = mapper.decode_hitter_for_agent(flat_action, state_after_fixed_shot, opponent)
             projected = mapper.project_hitter_action(state_after_fixed_shot, decoded.shot_action)
@@ -673,6 +734,8 @@ def _choose_likely_opponent_shots(
         except (RuntimeError, ValueError):
             continue
         opponent_action = validated.applied
+        if require_receiver_feasible and not feasible_intercept_indices(state_after_fixed_shot, opponent_action, config):
+            continue
         plans.append(
             OpponentShotPlan(
                 action_flat_index=int(decoded.flat_index),
@@ -683,12 +746,6 @@ def _choose_likely_opponent_shots(
         )
         if len(plans) >= int(count):
             break
-    total_probability = float(sum(max(float(plan.probability), 0.0) for plan in plans))
-    if plans and total_probability > 0.0 and np.isfinite(total_probability):
-        plans = [
-            replace(plan, probability=max(float(plan.probability), 0.0) / total_probability)
-            for plan in plans
-        ]
     return plans
 
 

@@ -12,6 +12,8 @@ from badminton1d.config import SimulationConfig
 from badminton1d.factorized_ppo import RecoveryFactorizedPPO, RecoveryFactorizedRolloutBuffer
 from badminton1d.policy import CONTINUOUS_LOG_STD_MAX, CONTINUOUS_LOG_STD_MIN, MaskedBadmintonPolicy
 from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig
+from badminton1d.shot_cf import ShotCFCandidate, select_diverse_shot_candidates
+from badminton1d.state import ShotAction
 from badminton1d.selfplay import FrozenCheckpointOpponent, LiveModelOpponent, MixedCheckpointOpponent, SelfPlayProgressVideoCallback
 from scripts import train_ppo, train_selfplay
 
@@ -36,6 +38,19 @@ class TrainingProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(args.recovery_counterfactual_distribution_temperature, 0.25)
         self.assertEqual(args.counterfactual_opponent_response_samples, 2)
         self.assertTrue(args.recovery_counterfactual_expected_response_target)
+        self.assertFalse(args.use_shot_cf)
+        self.assertAlmostEqual(args.shot_cf_coef, 0.1)
+        self.assertEqual(args.shot_cf_top_m, 20)
+        self.assertEqual(args.shot_cf_num_modes, 3)
+        self.assertAlmostEqual(args.shot_cf_min_landing_dist, 1.0)
+        self.assertEqual(args.shot_cf_depth, 1)
+        self.assertTrue(args.shot_cf_include_chosen)
+        self.assertTrue(args.shot_cf_skip_low_diversity)
+        self.assertEqual(args.shot_cf_min_modes, 2)
+        self.assertTrue(args.shot_cf_value_detach)
+        self.assertTrue(args.shot_cf_normalize)
+        self.assertFalse(args.shot_cf_debug_log)
+        self.assertFalse(rl_config.use_shot_cf)
         self.assertEqual(rl_config.counterfactual_opponent_response_samples, 2)
         self.assertTrue(rl_config.recovery_counterfactual_expected_response_target)
         self.assertTrue(args.random_service_x)
@@ -88,6 +103,18 @@ class TrainingProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(args.recovery_counterfactual_distribution_temperature, 0.25)
         self.assertEqual(args.counterfactual_opponent_response_samples, 2)
         self.assertTrue(args.recovery_counterfactual_expected_response_target)
+        self.assertFalse(args.use_shot_cf)
+        self.assertAlmostEqual(args.shot_cf_coef, 0.1)
+        self.assertEqual(args.shot_cf_top_m, 20)
+        self.assertEqual(args.shot_cf_num_modes, 3)
+        self.assertAlmostEqual(args.shot_cf_min_landing_dist, 1.0)
+        self.assertEqual(args.shot_cf_depth, 1)
+        self.assertTrue(args.shot_cf_include_chosen)
+        self.assertTrue(args.shot_cf_skip_low_diversity)
+        self.assertEqual(args.shot_cf_min_modes, 2)
+        self.assertTrue(args.shot_cf_value_detach)
+        self.assertTrue(args.shot_cf_normalize)
+        self.assertFalse(args.shot_cf_debug_log)
         self.assertEqual(args.n_envs, 8)
         self.assertEqual(args.log_interval, 10)
         self.assertEqual(args.save_interval, 2000)
@@ -183,6 +210,122 @@ class TrainingProtocolTests(unittest.TestCase):
         self.assertFalse(MixedCheckpointOpponent.__dataclass_fields__["deterministic"].default)
         self.assertFalse(SelfPlayProgressVideoCallback.__init__.__kwdefaults__["deterministic"])
         self.assertFalse(SafeWinRateEvalCallback.__init__.__kwdefaults__["deterministic"])
+
+    def test_shot_cf_candidate_selection_keeps_diverse_landings(self) -> None:
+        action = ShotAction(v_x=0.0, v_y=1.0, v_z=1.0, x_rec=0.0, y_rec=0.0)
+        candidates = [
+            ShotCFCandidate(0, (0, 0, 0), 0.0, 0.5, action, 0.0, 0.0),
+            ShotCFCandidate(1, (0, 0, 1), -0.1, 0.3, action, 0.2, 0.1),
+            ShotCFCandidate(2, (0, 1, 0), -0.2, 0.2, action, 2.0, 0.0),
+            ShotCFCandidate(3, (1, 0, 0), -0.3, 0.1, action, 0.0, 2.0),
+        ]
+
+        selection = select_diverse_shot_candidates(
+            candidates,
+            chosen_candidate=candidates[2],
+            num_modes=3,
+            min_landing_dist=1.0,
+            include_chosen=True,
+            skip_low_diversity=True,
+            min_modes=2,
+        )
+
+        self.assertFalse(selection.skipped)
+        self.assertEqual(len(selection.candidates), 3)
+        for left_index, left in enumerate(selection.candidates):
+            for right in selection.candidates[left_index + 1 :]:
+                self.assertGreaterEqual(
+                    float(np.hypot(left.landing_x - right.landing_x, left.landing_y - right.landing_y)),
+                    1.0,
+                )
+        self.assertEqual(selection.candidates[selection.chosen_index].flat_index, 2)
+
+    def test_shot_cf_candidate_selection_skips_low_diversity(self) -> None:
+        action = ShotAction(v_x=0.0, v_y=1.0, v_z=1.0, x_rec=0.0, y_rec=0.0)
+        candidates = [
+            ShotCFCandidate(0, (0, 0, 0), 0.0, 0.5, action, 0.0, 0.0),
+            ShotCFCandidate(1, (0, 0, 1), -0.1, 0.3, action, 0.1, 0.1),
+            ShotCFCandidate(2, (0, 1, 0), -0.2, 0.2, action, 0.2, 0.0),
+        ]
+
+        selection = select_diverse_shot_candidates(
+            candidates,
+            chosen_candidate=candidates[0],
+            num_modes=3,
+            min_landing_dist=1.0,
+            include_chosen=True,
+            skip_low_diversity=True,
+            min_modes=2,
+        )
+
+        self.assertTrue(selection.skipped)
+        self.assertEqual(selection.skip_reason, "low_diversity")
+
+    def test_shot_cf_candidate_selection_includes_chosen_mode(self) -> None:
+        action = ShotAction(v_x=0.0, v_y=1.0, v_z=1.0, x_rec=0.0, y_rec=0.0)
+        candidates = [
+            ShotCFCandidate(0, (0, 0, 0), 0.0, 0.5, action, 0.0, 0.0),
+            ShotCFCandidate(1, (0, 0, 1), -0.1, 0.3, action, 2.0, 0.0),
+        ]
+        chosen = ShotCFCandidate(5, (2, 0, 0), -2.0, 0.01, action, -2.0, 0.0)
+
+        selection = select_diverse_shot_candidates(
+            candidates,
+            chosen_candidate=chosen,
+            num_modes=2,
+            min_landing_dist=1.0,
+            include_chosen=True,
+            skip_low_diversity=True,
+            min_modes=2,
+        )
+
+        self.assertFalse(selection.skipped)
+        self.assertEqual(selection.candidates[selection.chosen_index].flat_index, 5)
+
+    def test_shot_cf_advantage_targets_are_detached(self) -> None:
+        config = SimulationConfig()
+        env = BadmintonRLEnv(
+            config=config,
+            rl_config=RLEnvConfig(
+                policy_type="velocity_oriented",
+                initial_server="left",
+                max_stages_per_rally=4,
+                use_shot_cf=True,
+            ),
+            seed=29,
+        )
+        model = RecoveryFactorizedPPO(
+            MaskedBadmintonPolicy,
+            env,
+            policy_kwargs={
+                "sim_config": config,
+                "policy_type": "velocity_oriented",
+            },
+            use_recovery_factorized_advantage=True,
+            use_shot_cf=True,
+            shot_cf_top_m=6,
+            shot_cf_num_modes=2,
+            shot_cf_min_modes=1,
+            shot_cf_value_detach=True,
+            n_steps=4,
+            batch_size=2,
+            n_epochs=1,
+            learning_rate=1e-4,
+            ent_coef=0.0,
+            verbose=0,
+            seed=29,
+        )
+
+        obs, _ = env.reset(seed=29)
+        obs_tensor, _ = model.policy.obs_to_tensor(obs)
+        with th.no_grad():
+            actions, _, _ = model.policy(obs_tensor)
+        _, _, _, _, info = env.step(int(actions.item()))
+
+        advantage, mask = model._shot_cf_advantage_from_transitions(obs_tensor, actions, [info])
+
+        self.assertFalse(advantage.requires_grad)
+        self.assertFalse(mask.requires_grad)
 
     def test_recovery_factorized_components_sum_to_conditional_logprob(self) -> None:
         config = SimulationConfig()

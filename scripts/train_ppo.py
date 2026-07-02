@@ -160,6 +160,18 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument("--recovery-full-diagnostics-probability", type=float, default=0.0)
+    parser.add_argument("--use-shot-cf", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--shot-cf-coef", type=float, default=0.1)
+    parser.add_argument("--shot-cf-top-m", type=int, default=20)
+    parser.add_argument("--shot-cf-num-modes", type=int, default=3)
+    parser.add_argument("--shot-cf-min-landing-dist", type=float, default=1.0)
+    parser.add_argument("--shot-cf-depth", type=int, default=1)
+    parser.add_argument("--shot-cf-include-chosen", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--shot-cf-skip-low-diversity", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--shot-cf-min-modes", type=int, default=2)
+    parser.add_argument("--shot-cf-value-detach", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--shot-cf-normalize", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--shot-cf-debug-log", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--eval-deterministic", action="store_true")
     parser.add_argument("--player-speed", type=float, default=SimulationConfig().player.v_max)
     parser.add_argument("--racket-length", type=float, default=SimulationConfig().player.r_reach)
@@ -274,6 +286,18 @@ def build_env_kwargs(args: argparse.Namespace) -> dict[str, object]:
             counterfactual_opponent_response_samples=args.counterfactual_opponent_response_samples,
             recovery_counterfactual_expected_response_target=args.recovery_counterfactual_expected_response_target,
             recovery_full_diagnostics_probability=args.recovery_full_diagnostics_probability,
+            use_shot_cf=args.use_shot_cf,
+            shot_cf_coef=args.shot_cf_coef,
+            shot_cf_top_m=args.shot_cf_top_m,
+            shot_cf_num_modes=args.shot_cf_num_modes,
+            shot_cf_min_landing_dist=args.shot_cf_min_landing_dist,
+            shot_cf_depth=args.shot_cf_depth,
+            shot_cf_include_chosen=args.shot_cf_include_chosen,
+            shot_cf_skip_low_diversity=args.shot_cf_skip_low_diversity,
+            shot_cf_min_modes=args.shot_cf_min_modes,
+            shot_cf_value_detach=args.shot_cf_value_detach,
+            shot_cf_normalize=args.shot_cf_normalize,
+            shot_cf_debug_log=args.shot_cf_debug_log,
         ),
         "discrete_action_config": DiscreteActionConfig(
             phi_bins=args.phi_bins,
@@ -313,6 +337,18 @@ def make_monitored_env(args: argparse.Namespace, output_dir: Path, include_recor
             rl_config.recovery_counterfactual_expected_response_target
         ),
         recovery_full_diagnostics_probability=rl_config.recovery_full_diagnostics_probability,
+        use_shot_cf=rl_config.use_shot_cf,
+        shot_cf_coef=rl_config.shot_cf_coef,
+        shot_cf_top_m=rl_config.shot_cf_top_m,
+        shot_cf_num_modes=rl_config.shot_cf_num_modes,
+        shot_cf_min_landing_dist=rl_config.shot_cf_min_landing_dist,
+        shot_cf_depth=rl_config.shot_cf_depth,
+        shot_cf_include_chosen=rl_config.shot_cf_include_chosen,
+        shot_cf_skip_low_diversity=rl_config.shot_cf_skip_low_diversity,
+        shot_cf_min_modes=rl_config.shot_cf_min_modes,
+        shot_cf_value_detach=rl_config.shot_cf_value_detach,
+        shot_cf_normalize=rl_config.shot_cf_normalize,
+        shot_cf_debug_log=rl_config.shot_cf_debug_log,
     )
 
     def _factory() -> Monitor:
@@ -343,6 +379,18 @@ def main() -> None:
         raise ValueError("--counterfactual-opponent-response-samples must be positive")
     if not 0.0 <= args.recovery_full_diagnostics_probability <= 1.0:
         raise ValueError("--recovery-full-diagnostics-probability must be in [0, 1]")
+    if args.shot_cf_coef < 0.0:
+        raise ValueError("--shot-cf-coef must be zero or greater")
+    if args.shot_cf_top_m <= 0:
+        raise ValueError("--shot-cf-top-m must be positive")
+    if args.shot_cf_num_modes <= 0:
+        raise ValueError("--shot-cf-num-modes must be positive")
+    if args.shot_cf_min_landing_dist < 0.0:
+        raise ValueError("--shot-cf-min-landing-dist must be non-negative")
+    if args.shot_cf_depth != 1:
+        raise ValueError("Only --shot-cf-depth 1 is implemented")
+    if args.shot_cf_min_modes <= 0:
+        raise ValueError("--shot-cf-min-modes must be positive")
 
     run_dir = args.output_dir
     checkpoint_dir = run_dir / "checkpoints"
@@ -397,19 +445,32 @@ def main() -> None:
         counterfactual_opponent_response_samples=safe_eval_rl_config.counterfactual_opponent_response_samples,
         recovery_counterfactual_expected_response_target=False,
         recovery_full_diagnostics_probability=0.0,
+        use_shot_cf=False,
     )
     safe_eval_env = BadmintonRLEnv(**safe_eval_kwargs, seed=args.seed + 10_000)
 
-    ppo_class = RecoveryFactorizedPPO if args.use_recovery_factorized_advantage else PPO
+    ppo_class = RecoveryFactorizedPPO if args.use_recovery_factorized_advantage or args.use_shot_cf else PPO
     ppo_extra_kwargs = (
         {
-            "use_recovery_factorized_advantage": True,
+            "use_recovery_factorized_advantage": args.use_recovery_factorized_advantage,
             "recovery_counterfactual_baseline": args.recovery_counterfactual_baseline,
             "recovery_counterfactual_advantage_coef": args.recovery_counterfactual_advantage_coef,
             "recovery_counterfactual_distribution_coef": args.recovery_counterfactual_distribution_coef,
             "recovery_counterfactual_distribution_temperature": args.recovery_counterfactual_distribution_temperature,
+            "use_shot_cf": args.use_shot_cf,
+            "shot_cf_coef": args.shot_cf_coef,
+            "shot_cf_top_m": args.shot_cf_top_m,
+            "shot_cf_num_modes": args.shot_cf_num_modes,
+            "shot_cf_min_landing_dist": args.shot_cf_min_landing_dist,
+            "shot_cf_depth": args.shot_cf_depth,
+            "shot_cf_include_chosen": args.shot_cf_include_chosen,
+            "shot_cf_skip_low_diversity": args.shot_cf_skip_low_diversity,
+            "shot_cf_min_modes": args.shot_cf_min_modes,
+            "shot_cf_value_detach": args.shot_cf_value_detach,
+            "shot_cf_normalize": args.shot_cf_normalize,
+            "shot_cf_debug_log": args.shot_cf_debug_log,
         }
-        if args.use_recovery_factorized_advantage
+        if args.use_recovery_factorized_advantage or args.use_shot_cf
         else {}
     )
     if args.base_checkpoint_path is None:
@@ -531,6 +592,18 @@ def main() -> None:
         "counterfactual_opponent_response_samples": args.counterfactual_opponent_response_samples,
         "recovery_counterfactual_expected_response_target": args.recovery_counterfactual_expected_response_target,
         "recovery_full_diagnostics_probability": args.recovery_full_diagnostics_probability,
+        "use_shot_cf": args.use_shot_cf,
+        "shot_cf_coef": args.shot_cf_coef,
+        "shot_cf_top_m": args.shot_cf_top_m,
+        "shot_cf_num_modes": args.shot_cf_num_modes,
+        "shot_cf_min_landing_dist": args.shot_cf_min_landing_dist,
+        "shot_cf_depth": args.shot_cf_depth,
+        "shot_cf_include_chosen": args.shot_cf_include_chosen,
+        "shot_cf_skip_low_diversity": args.shot_cf_skip_low_diversity,
+        "shot_cf_min_modes": args.shot_cf_min_modes,
+        "shot_cf_value_detach": args.shot_cf_value_detach,
+        "shot_cf_normalize": args.shot_cf_normalize,
+        "shot_cf_debug_log": args.shot_cf_debug_log,
         "eval_deterministic": args.eval_deterministic,
         "player_speed": args.player_speed,
         "racket_length": args.racket_length,

@@ -4,6 +4,7 @@ import argparse
 import csv
 import copy
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,27 @@ def parse_args() -> argparse.Namespace:
         default="chosen_landing_sample_trajectories_3d",
         help="PNG suffix written under PROBE_ID/opponent_default_position.",
     )
+    parser.add_argument(
+        "--opponent-recovery-grid-3x3",
+        action="store_true",
+        help=(
+            "Render each contact state under the same 3x3 opponent-position grid "
+            "used by plot_controlled_contact_top_shot_trajectories_3d.py."
+        ),
+    )
+    parser.add_argument(
+        "--skip-top3-choice-plots",
+        action="store_true",
+        help=(
+            "Do not render matching top-3 shot-choice trajectory plots after writing "
+            "the opponent recovery grid sample plots."
+        ),
+    )
+    parser.add_argument(
+        "--render-top3-choice-plots",
+        action="store_true",
+        help="Also recompute matching top-3 shot-choice trajectory plots.",
+    )
     return parser.parse_args()
 
 
@@ -71,26 +93,44 @@ def main() -> None:
     from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
     probe_dir = args.probe_dir
-    samples_csv = args.samples_csv or _probe_samples_path(probe_dir)
+    samples_csv = args.samples_csv or _probe_samples_path(
+        probe_dir,
+        prefer_opponent_conditioned=bool(args.opponent_recovery_grid_3x3),
+    )
     rows = _read_csv(samples_csv)
+    available_probe_ids = {str(row.get("probe_id")) for row in rows}
     selected_probe_ids = set(args.probe_id) if args.probe_id else {str(row["probe_id"]) for row in rows}
     run_dir = args.run_dir or _infer_run_dir(probe_dir)
     config = build_sim_config(load_run_config(run_dir))
     run_config = load_run_config(run_dir)
     train_side: Side = str(run_config.get("train_side", "left"))  # type: ignore[assignment]
     scenarios = _scenario_lookup(probe_dir, train_side, config)
+    if args.opponent_recovery_grid_3x3 and args.probe_id is None:
+        selected_probe_ids = {
+            probe_id
+            for probe_id, scenario in scenarios.items()
+            if str(scenario.get("contact_probe_id") or "").strip()
+        }
 
     written: dict[str, str] = {}
     for probe_id in sorted(selected_probe_ids):
+        scenario = scenarios.get(probe_id)
+        sample_probe_id = _sample_probe_id_for_scenario(probe_id, scenario, available_probe_ids)
         sample_rows = [
             row
             for row in rows
-            if str(row.get("probe_id")) == probe_id and _is_true(row.get("valid"))
+            if str(row.get("probe_id")) == sample_probe_id and _is_true(row.get("valid"))
         ]
+        sample_rows = _top_rank_rows(sample_rows)
         if not sample_rows:
             print(f"{probe_id}: no valid sample rows", flush=True)
             continue
-        sample_rows.sort(key=lambda row: (int(row["step"]), int(row.get("sample_index", 0))))
+        has_ranked_rows = "rank" in sample_rows[0]
+        sample_rows = (
+            _dedupe_rows_per_checkpoint(sample_rows)
+            if has_ranked_rows
+            else _best_rows_per_checkpoint(sample_rows)
+        )
 
         trajectories = [_trajectory_from_row(row, config) for row in sample_rows]
         steps = np.asarray([int(row["step"]) for row in sample_rows], dtype=float)
@@ -112,7 +152,6 @@ def main() -> None:
         )
         ax.add_collection3d(collection, autolim=False)
 
-        scenario = scenarios.get(probe_id)
         contact = sample_rows[-1]
         contact_xyz = (
             float(contact["contact_x"]),
@@ -132,7 +171,7 @@ def main() -> None:
             alpha=0.55,
             linewidths=0.0,
             depthshade=False,
-            label="chosen landings",
+            label="top-1 chosen landings" if has_ranked_rows else "best chosen landings",
             zorder=7,
         )
         ax.scatter(
@@ -186,7 +225,8 @@ def main() -> None:
         mappable.set_array(steps)
         fig.colorbar(mappable, ax=ax, fraction=0.035, pad=0.035, shrink=0.72, label="checkpoint step (M)")
         title = str(sample_rows[-1].get("probe_title") or probe_id.replace("_", " "))
-        ax.set_title(f"{title}\nchosen landing sample trajectories", pad=8.0, fontsize=13)
+        subtitle = "top-1 chosen landing trajectories" if has_ranked_rows else "best chosen landing trajectories"
+        ax.set_title(f"{title}\n{subtitle}", pad=8.0, fontsize=13)
         ax.legend(loc="upper right", fontsize=8, frameon=True)
 
         output_dir = probe_dir / _output_relative_dir_for_rows(sample_rows, scenario)
@@ -213,9 +253,24 @@ def main() -> None:
         encoding="utf-8",
     )
     print(f"manifest: {manifest_path}")
+    if (
+        args.opponent_recovery_grid_3x3
+        and args.render_top3_choice_plots
+        and not args.skip_top3_choice_plots
+        and written
+    ):
+        _render_top3_choice_companion_plots(args, probe_dir=probe_dir, run_dir=run_dir, selected_probe_ids=written.keys())
 
 
-def _probe_samples_path(probe_dir: Path) -> Path:
+def _probe_samples_path(probe_dir: Path, *, prefer_opponent_conditioned: bool = False) -> Path:
+    if prefer_opponent_conditioned:
+        top3_path = (
+            probe_dir
+            / "top3_expectation_evolution_probe_views"
+            / "top3_expectation_evolution_samples.csv"
+        )
+        if top3_path.exists():
+            return top3_path
     default_path = probe_dir / "controlled_contact_grid_probe_samples.csv"
     if default_path.exists():
         return default_path
@@ -262,6 +317,67 @@ def _is_true(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes"}
 
 
+def _best_rows_per_checkpoint(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    best_by_checkpoint: dict[tuple[int, str], dict[str, str]] = {}
+    for row in rows:
+        key = (int(row["step"]), str(row.get("checkpoint_path") or ""))
+        current = best_by_checkpoint.get(key)
+        if current is None or _best_row_sort_key(row) > _best_row_sort_key(current):
+            best_by_checkpoint[key] = row
+    return sorted(
+        best_by_checkpoint.values(),
+        key=lambda row: (int(row["step"]), int(row.get("sample_index", 0))),
+    )
+
+
+def _dedupe_rows_per_checkpoint(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    best_by_checkpoint: dict[tuple[int, str], dict[str, str]] = {}
+    for row in rows:
+        key = (int(row["step"]), str(row.get("checkpoint_path") or ""))
+        current = best_by_checkpoint.get(key)
+        if current is None or int(row.get("sample_index", 0)) < int(current.get("sample_index", 0)):
+            best_by_checkpoint[key] = row
+    return sorted(
+        best_by_checkpoint.values(),
+        key=lambda row: (int(row["step"]), int(row.get("sample_index", 0))),
+    )
+
+
+def _top_rank_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    ranked_rows = [row for row in rows if str(row.get("rank") or "").strip()]
+    if not ranked_rows:
+        return rows
+    return [row for row in ranked_rows if _int_or_none(row.get("rank")) == 1]
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _best_row_sort_key(row: dict[str, str]) -> tuple[float, float, float, float, float, int]:
+    return (
+        _float_or_negative_inf(row.get("anchor_shot_value")),
+        _float_or_negative_inf(row.get("anchor_after_win_probability")),
+        _float_or_negative_inf(row.get("shot_value")),
+        _float_or_negative_inf(row.get("after_win_probability")),
+        _float_or_negative_inf(row.get("pressure")),
+        -int(row.get("sample_index", 0)),
+    )
+
+
+def _float_or_negative_inf(value: Any) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return float("-inf")
+    if not np.isfinite(parsed):
+        return float("-inf")
+    return parsed
+
+
 def _trajectory_from_row(row: dict[str, str], config: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     result = simulate_trajectory(
         float(row["contact_x"]),
@@ -277,6 +393,20 @@ def _trajectory_from_row(row: dict[str, str], config: Any) -> tuple[np.ndarray, 
         np.asarray([point.y for point in result.samples], dtype=float),
         np.asarray([point.z for point in result.samples], dtype=float),
     )
+
+
+def _sample_probe_id_for_scenario(
+    probe_id: str,
+    scenario: dict[str, Any] | None,
+    available_probe_ids: set[str],
+) -> str:
+    if probe_id in available_probe_ids:
+        return probe_id
+    if scenario is not None:
+        contact_probe_id = str(scenario.get("contact_probe_id") or "").strip()
+        if contact_probe_id and contact_probe_id in available_probe_ids:
+            return contact_probe_id
+    return probe_id.split("__", 1)[0]
 
 
 def _scenario_lookup(probe_dir: Path, train_side: Side, config: Any) -> dict[str, dict[str, Any]]:
@@ -383,11 +513,32 @@ def _output_relative_dir_for_rows(
     if contact_probe_id and opponent_cell_id:
         return Path(contact_probe_id) / opponent_cell_id
     return Path(str(row["probe_id"])) / "opponent_default_position"
-    return (
-        np.asarray([point.x for point in result.samples], dtype=float),
-        np.asarray([point.y for point in result.samples], dtype=float),
-        np.asarray([point.z for point in result.samples], dtype=float),
-    )
+
+
+def _render_top3_choice_companion_plots(
+    args: argparse.Namespace,
+    *,
+    probe_dir: Path,
+    run_dir: Path,
+    selected_probe_ids: Any,
+) -> None:
+    command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "plot_controlled_contact_top_shot_trajectories_3d.py"),
+        str(probe_dir),
+        "--run-dir",
+        str(run_dir),
+        "--top-k",
+        "3",
+        "--output-name-suffix",
+        "top3_shot_trajectories_3d",
+        "--opponent-recovery-grid-3x3",
+    ]
+    if args.probe_id is not None:
+        for probe_id in sorted(str(probe_id) for probe_id in selected_probe_ids):
+            command.extend(["--probe-id", probe_id])
+    print("rendering matching top-3 shot-choice trajectory plots", flush=True)
+    subprocess.run(command, check=True)
 
 
 def _expand_slider_court_view(
