@@ -157,7 +157,7 @@ and evaluation runs are under `cluster/`.
 ## Repository map
 
 ```text
-badminton1d/    environment, dynamics, policies, self-play, evaluation, rendering
+badminton/    environment, dynamics, policies, self-play, evaluation, rendering
 scripts/        demos, training, probes, evaluations, and figure generation
 tests/          physics, movement, action, RL, evaluation, and media tests
 cluster/        reproducible multi-seed batch specifications

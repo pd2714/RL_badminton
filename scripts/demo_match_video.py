@@ -8,13 +8,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.agents import GreedyReceiver, RandomValidHitter, StageAgent
-from badminton1d.config import SimulationConfig
-from badminton1d.match import MatchConfig, MatchResult, run_match
-from badminton1d.playback import build_match_trace
-from badminton1d.render import ScoreboardOverlay, render_stage
-from badminton1d.state import StageRecord
-from badminton1d.video import export_match_video
+from badminton.agents import GreedyReceiver, RandomValidHitter, StageAgent
+from badminton.config import SimulationConfig
+from badminton.match import MatchConfig, MatchResult, run_match
+from badminton.playback import build_match_trace
+from badminton.render import ScoreboardOverlay, render_stage
+from badminton.state import StageRecord
+from badminton.video import export_match_video
 
 
 def build_demo_agents(seed: int) -> tuple[StageAgent, StageAgent]:

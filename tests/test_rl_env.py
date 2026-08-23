@@ -5,13 +5,13 @@ from unittest.mock import patch
 
 import numpy as np
 
-from badminton1d.action_space import DiscreteActionConfig, DiscreteActionMapper
-from badminton1d.config import ActionConfig, SimulationConfig
-from badminton1d.dynamics import feasible_intercept_indices, landing_position, prepare_shot, simulate_trajectory
-from badminton1d.obs import ObservationEncoder
-from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig
-from badminton1d.state import ShotAction, StageState
-from badminton1d.utils import recovery_bounds, side_y_bounds, x_bounds
+from badminton.action_space import DiscreteActionConfig, DiscreteActionMapper
+from badminton.config import ActionConfig, SimulationConfig
+from badminton.dynamics import feasible_intercept_indices, landing_position, prepare_shot, simulate_trajectory
+from badminton.obs import ObservationEncoder
+from badminton.rl_env import BadmintonRLEnv, RLEnvConfig
+from badminton.state import ShotAction, StageState
+from badminton.utils import recovery_bounds, side_y_bounds, x_bounds
 
 
 class RLEnvTests(unittest.TestCase):
@@ -94,7 +94,7 @@ class RLEnvTests(unittest.TestCase):
         }
         direct = encoder.encode(**kwargs)
 
-        with patch("badminton1d.dynamics.simulate_trajectory", wraps=simulate_trajectory) as mocked_simulate:
+        with patch("badminton.dynamics.simulate_trajectory", wraps=simulate_trajectory) as mocked_simulate:
             reused = encoder.encode(**kwargs, prepared_shot=prepared)
 
         self.assertEqual(mocked_simulate.call_count, 0)

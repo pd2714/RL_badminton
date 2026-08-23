@@ -8,25 +8,25 @@ import matplotlib
 import numpy as np
 from stable_baselines3 import PPO
 
-from badminton1d.action_space import DiscreteActionConfig
-from badminton1d.config import CourtConfig, SimulationConfig
-from badminton1d.policy import MaskedBadmintonPolicy
-from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig
-from badminton1d.shot_generators import (
+from badminton.action_space import DiscreteActionConfig
+from badminton.config import CourtConfig, SimulationConfig
+from badminton.policy import MaskedBadmintonPolicy
+from badminton.rl_env import BadmintonRLEnv, RLEnvConfig
+from badminton.shot_generators import (
     SHOT_NAME_ORDER,
     TacticAction2D,
     TacticLookup1D,
     TacticLookup2D,
     TacticRuntimeConfig,
 )
-from badminton1d.shot_generators.tactic_lookup_common import (
+from badminton.shot_generators.tactic_lookup_common import (
     ANGLE_BIN_COUNT_1D,
     LANDING_ZONE_COUNT_1D,
     POWER_BIN_NAMES_1D,
     angle_bin_centers_deg_1d,
     power_speed_targets_1d,
 )
-from badminton1d.state import StageState
+from badminton.state import StageState
 from scripts.visualize_tactic_lookup_1d import build_plot as build_plot_1d
 from scripts.visualize_tactic_lookup_2d import build_plot as build_plot_2d
 

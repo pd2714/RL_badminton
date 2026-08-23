@@ -3,15 +3,15 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from badminton1d.config import SimulationConfig
-from badminton1d.curricula import (
+from badminton.config import SimulationConfig
+from badminton.curricula import (
     DEFAULT_DEFENSIVE_CURRICULUM_NAME,
     DefensiveBackcourtCurriculumConfig,
     build_training_curriculum,
 )
-from badminton1d.match import MatchConfig
-from badminton1d.reset_sampling import ResetSampler, ResetSamplingConfig
-from badminton1d.utils import side_y_bounds
+from badminton.match import MatchConfig
+from badminton.reset_sampling import ResetSampler, ResetSamplingConfig
+from badminton.utils import side_y_bounds
 
 
 class DefensiveCurriculumTests(unittest.TestCase):

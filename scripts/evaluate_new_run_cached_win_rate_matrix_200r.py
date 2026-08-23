@@ -20,12 +20,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.elo import PairwiseRecord, calculate_elo, ratings_table
-from badminton1d.eval_evolution import build_discrete_action_config, build_sim_config
-from badminton1d.evaluation import ModelSelector, rollout_episode, summarize_episodes
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
-from badminton1d.selfplay import CheckpointPool, FixedCheckpointOpponent, build_selfplay_env
-from badminton1d.utils import ensure_directory
+from badminton.elo import PairwiseRecord, calculate_elo, ratings_table
+from badminton.eval_evolution import build_discrete_action_config, build_sim_config
+from badminton.evaluation import ModelSelector, rollout_episode, summarize_episodes
+from badminton.mpl_config import ensure_writable_matplotlib_config
+from badminton.selfplay import CheckpointPool, FixedCheckpointOpponent, build_selfplay_env
+from badminton.utils import ensure_directory
 
 
 DEFAULT_NEW_RUN = Path(

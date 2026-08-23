@@ -11,20 +11,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.action_space import DiscreteActionConfig
-from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
-from badminton1d.eval_diversity import DiversityEvalConfig, run_diversity_evaluation
-from badminton1d.evaluation import BaselineSelector, ModelSelector, evaluate_selector
-from badminton1d.match import MatchResult, MatchScore, RallyResult
-from badminton1d.obs import ObservationEncoder
-from badminton1d.opponents import make_baseline_policy
-from badminton1d.playback import build_match_trace, build_rally_trace
-from badminton1d.reset_sampling import ResetSamplingConfig
-from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig, RewardConfig
-from badminton1d.shot_generators import TacticRuntimeConfig
-from badminton1d.selfplay import CheckpointPool, FixedCheckpointOpponent, LiveModelOpponent, build_selfplay_env
-from badminton1d.utils import ensure_directory
-from badminton1d.video import export_match_video, export_rally_video
+from badminton.action_space import DiscreteActionConfig
+from badminton.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
+from badminton.eval_diversity import DiversityEvalConfig, run_diversity_evaluation
+from badminton.evaluation import BaselineSelector, ModelSelector, evaluate_selector
+from badminton.match import MatchResult, MatchScore, RallyResult
+from badminton.obs import ObservationEncoder
+from badminton.opponents import make_baseline_policy
+from badminton.playback import build_match_trace, build_rally_trace
+from badminton.reset_sampling import ResetSamplingConfig
+from badminton.rl_env import BadmintonRLEnv, RLEnvConfig, RewardConfig
+from badminton.shot_generators import TacticRuntimeConfig
+from badminton.selfplay import CheckpointPool, FixedCheckpointOpponent, LiveModelOpponent, build_selfplay_env
+from badminton.utils import ensure_directory
+from badminton.video import export_match_video, export_rally_video
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a PPO badminton checkpoint and export example videos.")

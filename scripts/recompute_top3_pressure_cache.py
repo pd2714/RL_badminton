@@ -15,11 +15,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.dynamics import candidate_intercept_points, feasible_intercept_indices, reaction_time_for_side
-from badminton1d.eval_evolution import build_sim_config, load_run_config
-from badminton1d.pressure import shot_pressure_from_candidates
-from badminton1d.state import ShotAction
-from badminton1d.utils import player_position, player_velocity
+from badminton.dynamics import candidate_intercept_points, feasible_intercept_indices, reaction_time_for_side
+from badminton.eval_evolution import build_sim_config, load_run_config
+from badminton.pressure import shot_pressure_from_candidates
+from badminton.state import ShotAction
+from badminton.utils import player_position, player_velocity
 
 from scripts.evaluate_controlled_lift_probe import _write_csv
 from scripts.render_controlled_contact_top3_expectation_evolution_plots import (

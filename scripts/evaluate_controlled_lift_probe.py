@@ -18,15 +18,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.action_space import DiscreteActionMapper
-from badminton1d.dynamics import (
+from badminton.action_space import DiscreteActionMapper
+from badminton.dynamics import (
     candidate_intercept_points,
     feasible_intercept_indices,
     landing_position,
     validate_and_clip_shot_action,
 )
-from badminton1d.env import Badminton1DEnv
-from badminton1d.eval_evolution import (
+from badminton.env import Badminton1DEnv
+from badminton.eval_evolution import (
     LANDING_ZONE_NAMES,
     SHOT_TYPE_ORDER,
     build_discrete_action_config,
@@ -38,13 +38,13 @@ from badminton1d.eval_evolution import (
     load_anchor_model,
     load_run_config,
 )
-from badminton1d.evaluation import adapt_observation_to_model
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
-from badminton1d.obs import ObservationConfig, ObservationEncoder
-from badminton1d.pressure import shot_pressure_from_record
-from badminton1d.shot_generators import name_velocity_shot
-from badminton1d.state import ShotAction, Side, StageState
-from badminton1d.utils import (
+from badminton.evaluation import adapt_observation_to_model
+from badminton.mpl_config import ensure_writable_matplotlib_config
+from badminton.obs import ObservationConfig, ObservationEncoder
+from badminton.pressure import shot_pressure_from_record
+from badminton.shot_generators import name_velocity_shot
+from badminton.state import ShotAction, Side, StageState
+from badminton.utils import (
     default_player_position,
     ensure_directory,
     opponent_side,

@@ -15,8 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.config import SimulationConfig
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
+from badminton.config import SimulationConfig
+from badminton.mpl_config import ensure_writable_matplotlib_config
 
 ensure_writable_matplotlib_config()
 
@@ -28,7 +28,7 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 from matplotlib.patches import Rectangle
 
-from badminton1d.shot_generators import name_velocity_shot
+from badminton.shot_generators import name_velocity_shot
 
 
 DEFAULT_RUN_DIRS = tuple(

@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
-from badminton1d.dynamics import (
+from badminton.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
+from badminton.dynamics import (
     REACTION_MISS_FLIGHT_TIME_THRESHOLD,
     REACTION_MISS_SECONDARY_FLIGHT_TIME_THRESHOLD,
     REACTION_MISS_ZERO_FLIGHT_TIME_THRESHOLD,
@@ -17,9 +17,9 @@ from badminton1d.dynamics import (
     step_stage,
     trajectory_result,
 )
-from badminton1d.movement import advance_player_toward, intercept_body_target_after_reaction
-from badminton1d.state import ShotAction, StageState
-from badminton1d.utils import move_toward
+from badminton.movement import advance_player_toward, intercept_body_target_after_reaction
+from badminton.state import ShotAction, StageState
+from badminton.utils import move_toward
 
 
 class TransitionTests(unittest.TestCase):
@@ -179,7 +179,7 @@ class TransitionTests(unittest.TestCase):
         times, _, _, _ = candidate_intercept_points(state, action, self.config)
         self.assertGreater(reaction_miss_probability(float(times[chosen]), self.config), 0.0)
 
-        with patch("badminton1d.dynamics.np.random.random", return_value=0.0):
+        with patch("badminton.dynamics.np.random.random", return_value=0.0):
             record = step_stage(state, action, chosen, self.config)
 
         self.assertTrue(record.next_state.rally_done)
@@ -210,7 +210,7 @@ class TransitionTests(unittest.TestCase):
         self.assertGreaterEqual(chosen_time, REACTION_MISS_ZERO_FLIGHT_TIME_THRESHOLD)
         self.assertAlmostEqual(reaction_miss_probability(chosen_time), 0.0)
 
-        with patch("badminton1d.dynamics.np.random.random", return_value=0.29):
+        with patch("badminton.dynamics.np.random.random", return_value=0.29):
             returned_record = step_stage(state, action, chosen, self.config)
         self.assertNotEqual(returned_record.terminal_reason, "reaction_miss")
 
@@ -240,10 +240,10 @@ class TransitionTests(unittest.TestCase):
         self.assertGreater(miss_probability, 0.0)
         self.assertLess(miss_probability, 0.8)
 
-        with patch("badminton1d.dynamics.np.random.random", return_value=miss_probability - 0.01):
+        with patch("badminton.dynamics.np.random.random", return_value=miss_probability - 0.01):
             missed_record = step_stage(state, action, chosen, config)
             no_miss_record = step_stage(state, action, chosen, config, enable_reaction_miss=False)
-        with patch("badminton1d.dynamics.np.random.random", return_value=miss_probability + 0.01):
+        with patch("badminton.dynamics.np.random.random", return_value=miss_probability + 0.01):
             returned_record = step_stage(state, action, chosen, config)
 
         self.assertEqual(missed_record.terminal_reason, "reaction_miss")
@@ -289,7 +289,7 @@ class TransitionTests(unittest.TestCase):
         )
         action = ShotAction(v_x=0.9, v_y=5.8, v_z=5.0, x_rec=0.0, y_rec=-1.8)
 
-        with patch("badminton1d.dynamics.trajectory_result", wraps=trajectory_result) as mocked_result:
+        with patch("badminton.dynamics.trajectory_result", wraps=trajectory_result) as mocked_result:
             prepared = prepare_shot(state, action, config)
             self.assertTrue(prepared.feasible_indices)
             chosen = prepared.feasible_indices[0]

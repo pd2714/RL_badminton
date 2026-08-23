@@ -10,27 +10,27 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
+from badminton.mpl_config import ensure_writable_matplotlib_config
 
 ensure_writable_matplotlib_config()
 
 import matplotlib
 import numpy as np
 
-from badminton1d.action_space import DiscreteActionConfig, DiscreteActionMapper
-from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
-from badminton1d.dynamics import candidate_intercept_points, feasible_intercept_indices, valid_hitter_action
-from badminton1d.render import (
+from badminton.action_space import DiscreteActionConfig, DiscreteActionMapper
+from badminton.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
+from badminton.dynamics import candidate_intercept_points, feasible_intercept_indices, valid_hitter_action
+from badminton.render import (
     GROUND_MARKER_Z,
     OFFICIAL_DOUBLES_WIDTH,
     PLAYER_FOOT_Z,
     setup_3d_court_axes,
     stage_colors,
 )
-from badminton1d.shot_generators.shot_naming import name_velocity_shot
-from badminton1d.state import Side, StageState
-from badminton1d.trajectory import simulate_trajectory
-from badminton1d.utils import default_player_position, opponent_side, service_court_x, side_y_bounds, x_bounds
+from badminton.shot_generators.shot_naming import name_velocity_shot
+from badminton.state import Side, StageState
+from badminton.trajectory import simulate_trajectory
+from badminton.utils import default_player_position, opponent_side, service_court_x, side_y_bounds, x_bounds
 
 
 DEFAULT_RUN_DIR = Path(

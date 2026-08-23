@@ -14,11 +14,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.evaluation import ModelSelector
-from badminton1d.playback import MatchTrace, RallyTrace, build_rally_trace
-from badminton1d.state import Side
-from badminton1d.utils import ensure_directory, side_y_bounds
-from badminton1d.video import _shot_type_text, export_match_video
+from badminton.evaluation import ModelSelector
+from badminton.playback import MatchTrace, RallyTrace, build_rally_trace
+from badminton.state import Side
+from badminton.utils import ensure_directory, side_y_bounds
+from badminton.video import _shot_type_text, export_match_video
 from scripts.round_robin_selfplay_video import (
     AgentSpec,
     _load_config,

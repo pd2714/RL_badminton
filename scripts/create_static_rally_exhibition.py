@@ -11,7 +11,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
+from badminton.mpl_config import ensure_writable_matplotlib_config
 
 ensure_writable_matplotlib_config()
 
@@ -21,11 +21,11 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 
-from badminton1d.config import SimulationConfig
-from badminton1d.playback import RallyTrace, StageTrace, interpolate_stage, match_trace_from_dict, rally_trace_from_dict
-from badminton1d.render import GROUND_MARKER_Z, OFFICIAL_DOUBLES_WIDTH, draw_players_3d, setup_3d_court_axes, stage_colors
-from badminton1d.utils import ensure_directory
-from badminton1d.video import _marker_size, _trajectory_segment
+from badminton.config import SimulationConfig
+from badminton.playback import RallyTrace, StageTrace, interpolate_stage, match_trace_from_dict, rally_trace_from_dict
+from badminton.render import GROUND_MARKER_Z, OFFICIAL_DOUBLES_WIDTH, draw_players_3d, setup_3d_court_axes, stage_colors
+from badminton.utils import ensure_directory
+from badminton.video import _marker_size, _trajectory_segment
 
 
 def parse_args() -> argparse.Namespace:

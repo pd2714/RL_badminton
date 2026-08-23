@@ -10,9 +10,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
-from badminton1d.playback import match_trace_from_dict
-from badminton1d.pressure import (
+from badminton.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
+from badminton.playback import match_trace_from_dict
+from badminton.pressure import (
     ShotPressureWeights,
     evaluate_match_pressure,
     resolve_match_trace_path,

@@ -14,14 +14,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.action_space import DiscreteActionMapper
-from badminton1d.dynamics import (
+from badminton.action_space import DiscreteActionMapper
+from badminton.dynamics import (
     candidate_intercept_points,
     feasible_intercept_indices,
     landing_position,
     validate_and_clip_shot_action,
 )
-from badminton1d.eval_evolution import (
+from badminton.eval_evolution import (
     build_discrete_action_config,
     build_sim_config,
     checkpoint_step,
@@ -30,9 +30,9 @@ from badminton1d.eval_evolution import (
     load_anchor_model,
     load_run_config,
 )
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
-from badminton1d.obs import ObservationConfig, ObservationEncoder
-from badminton1d.utils import default_player_position, ensure_directory, opponent_side
+from badminton.mpl_config import ensure_writable_matplotlib_config
+from badminton.obs import ObservationConfig, ObservationEncoder
+from badminton.utils import default_player_position, ensure_directory, opponent_side
 from scripts.evaluate_recovery_choice_probe import (
     RecoveryScenario,
     _fixed_hitter_state,

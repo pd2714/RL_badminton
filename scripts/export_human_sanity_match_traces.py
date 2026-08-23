@@ -13,9 +13,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.evaluation import ModelSelector
-from badminton1d.playback import match_trace_to_dict
-from badminton1d.utils import ensure_directory
+from badminton.evaluation import ModelSelector
+from badminton.playback import match_trace_to_dict
+from badminton.utils import ensure_directory
 from scripts.export_checkpoint_matchup_videos import checkpoint_agent
 from scripts.round_robin_selfplay_video import (
     _load_config,

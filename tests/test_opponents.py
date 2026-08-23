@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
-from badminton1d.dynamics import landing_position
-from badminton1d.opponents import make_opponent
-from badminton1d.state import StageState
-from badminton1d.utils import service_target_bounds_for_receiver
+from badminton.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
+from badminton.dynamics import landing_position
+from badminton.opponents import make_opponent
+from badminton.state import StageState
+from badminton.utils import service_target_bounds_for_receiver
 
 
 class OpponentTests(unittest.TestCase):

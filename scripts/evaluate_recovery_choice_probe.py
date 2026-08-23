@@ -18,16 +18,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.action_space import DiscreteActionMapper
-from badminton1d.dynamics import (
+from badminton.action_space import DiscreteActionMapper
+from badminton.dynamics import (
     candidate_intercept_points,
     feasible_intercept_indices,
     landing_position,
     reaction_miss_probability,
     validate_and_clip_shot_action,
 )
-from badminton1d.env import Badminton1DEnv
-from badminton1d.eval_evolution import (
+from badminton.env import Badminton1DEnv
+from badminton.eval_evolution import (
     build_discrete_action_config,
     build_sim_config,
     checkpoint_step,
@@ -36,13 +36,13 @@ from badminton1d.eval_evolution import (
     load_anchor_model,
     load_run_config,
 )
-from badminton1d.evaluation import adapt_observation_to_model, choose_model_action
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
-from badminton1d.opponents import DecisionContext
-from badminton1d.obs import ObservationConfig, ObservationEncoder
-from badminton1d.render import setup_court_axes, stage_colors
-from badminton1d.state import ShotAction, Side, StageState
-from badminton1d.utils import (
+from badminton.evaluation import adapt_observation_to_model, choose_model_action
+from badminton.mpl_config import ensure_writable_matplotlib_config
+from badminton.opponents import DecisionContext
+from badminton.obs import ObservationConfig, ObservationEncoder
+from badminton.render import setup_court_axes, stage_colors
+from badminton.state import ShotAction, Side, StageState
+from badminton.utils import (
     default_player_position,
     ensure_directory,
     opponent_side,
@@ -884,7 +884,7 @@ def _score_fixed_opponent_response(
 
     env = Badminton1DEnv(config=config)
     env.reset(state_after_fixed_shot)
-    with patch("badminton1d.dynamics.np.random.random", return_value=1.0):
+    with patch("badminton.dynamics.np.random.random", return_value=1.0):
         response_record = env.step(opponent_action, response_index)
     no_miss_score = _after_shot_win_probability(
         model,

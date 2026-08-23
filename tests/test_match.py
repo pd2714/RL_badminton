@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import unittest
 
-from badminton1d.agents import SafeHitter, StageAgent
-from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import feasible_intercept_indices
-from badminton1d.env import Badminton1DEnv, default_initial_state
-from badminton1d.match import MatchConfig, reset_for_serve, run_match, service_receive_position, with_service_court_x_side
-from badminton1d.playback import build_match_trace
-from badminton1d.state import ShotAction
-from badminton1d.trajectory import ballistic_landing_time
+from badminton.agents import SafeHitter, StageAgent
+from badminton.config import SimulationConfig
+from badminton.dynamics import feasible_intercept_indices
+from badminton.env import Badminton1DEnv, default_initial_state
+from badminton.match import MatchConfig, reset_for_serve, run_match, service_receive_position, with_service_court_x_side
+from badminton.playback import build_match_trace
+from badminton.state import ShotAction
+from badminton.trajectory import ballistic_landing_time
 
 
 class AlwaysMissReceiver:

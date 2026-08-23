@@ -8,8 +8,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
-from badminton1d.shot_generators import TacticLookup1D, TacticLookup2D, TacticRuntimeConfig
+from badminton.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
+from badminton.shot_generators import TacticLookup1D, TacticLookup2D, TacticRuntimeConfig
 
 
 def parse_args() -> argparse.Namespace:

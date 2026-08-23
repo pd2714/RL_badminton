@@ -19,9 +19,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.eval_evolution import build_sim_config, load_run_config
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
-from badminton1d.trajectory import simulate_trajectory
+from badminton.eval_evolution import build_sim_config, load_run_config
+from badminton.mpl_config import ensure_writable_matplotlib_config
+from badminton.trajectory import simulate_trajectory
 from scripts.plot_recovery_probe_fixed_shots_3d import (
     _payload_float,
     _row_float,

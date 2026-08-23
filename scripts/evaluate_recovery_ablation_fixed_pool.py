@@ -27,17 +27,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.action_space import DiscreteActionMapper
-from badminton1d.config import SimulationConfig
-from badminton1d.elo import PairwiseRecord, calculate_elo, ratings_table
-from badminton1d.evaluation import ModelSelector, choose_model_action, summarize_episodes
-from badminton1d.opponents import DecisionContext, make_opponent
-from badminton1d.policy import MaskedBadmintonPolicy
-from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig, RewardConfig
-from badminton1d.selfplay import CheckpointPool, FixedCheckpointOpponent, build_selfplay_env
-from badminton1d.shot_generators import TacticRuntimeConfig
-from badminton1d.state import ShotAction, Side, StageState
-from badminton1d.utils import canonicalize_state_for_agent, ensure_directory, recovery_bounds
+from badminton.action_space import DiscreteActionMapper
+from badminton.config import SimulationConfig
+from badminton.elo import PairwiseRecord, calculate_elo, ratings_table
+from badminton.evaluation import ModelSelector, choose_model_action, summarize_episodes
+from badminton.opponents import DecisionContext, make_opponent
+from badminton.policy import MaskedBadmintonPolicy
+from badminton.rl_env import BadmintonRLEnv, RLEnvConfig, RewardConfig
+from badminton.selfplay import CheckpointPool, FixedCheckpointOpponent, build_selfplay_env
+from badminton.shot_generators import TacticRuntimeConfig
+from badminton.state import ShotAction, Side, StageState
+from badminton.utils import canonicalize_state_for_agent, ensure_directory, recovery_bounds
 from scripts.round_robin_selfplay_video import (
     AgentSpec,
     _config_value,

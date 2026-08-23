@@ -17,9 +17,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.action_space import DiscreteActionMapper
-from badminton1d.dynamics import landing_position, validate_and_clip_shot_action
-from badminton1d.eval_evolution import (
+from badminton.action_space import DiscreteActionMapper
+from badminton.dynamics import landing_position, validate_and_clip_shot_action
+from badminton.eval_evolution import (
     build_discrete_action_config,
     build_sim_config,
     checkpoint_step,
@@ -27,10 +27,10 @@ from badminton1d.eval_evolution import (
     load_anchor_model,
     load_run_config,
 )
-from badminton1d.evaluation import adapt_observation_to_model
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
-from badminton1d.obs import ObservationConfig, ObservationEncoder
-from badminton1d.render import (
+from badminton.evaluation import adapt_observation_to_model
+from badminton.mpl_config import ensure_writable_matplotlib_config
+from badminton.obs import ObservationConfig, ObservationEncoder
+from badminton.render import (
     COURT_LINE_Z,
     COURT_SURFACE_Z,
     GROUND_MARKER_Z,
@@ -40,10 +40,10 @@ from badminton1d.render import (
     OFFICIAL_SINGLES_WIDTH,
     stage_colors,
 )
-from badminton1d.shot_generators import name_velocity_shot
-from badminton1d.state import Side, StageState
-from badminton1d.trajectory import simulate_trajectory
-from badminton1d.utils import ensure_directory, opponent_side, recovery_bounds
+from badminton.shot_generators import name_velocity_shot
+from badminton.state import Side, StageState
+from badminton.trajectory import simulate_trajectory
+from badminton.utils import ensure_directory, opponent_side, recovery_bounds
 
 TRAJECTORY_VIEW_ELEV = 18.0
 TRAJECTORY_VIEW_AZIM = -62.0

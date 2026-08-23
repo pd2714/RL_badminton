@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import torch
 
-from badminton1d.action_space import (
+from badminton.action_space import (
     VELOCITY_ORIENTED_MIDRALLY_FAR_BOUNDARY_PHI_TRIM_DEG,
     VELOCITY_ORIENTED_MIDRALLY_NEAR_BOUNDARY_PHI_TRIM_DEG,
     VELOCITY_ORIENTED_PHI_CLUSTER_POWER,
@@ -15,14 +15,14 @@ from badminton1d.action_space import (
     DiscreteActionConfig,
     DiscreteActionMapper,
 )
-from badminton1d.agents import SafeHitter
-from badminton1d.config import ActionConfig, CourtConfig, SimulationConfig
-from badminton1d.evaluation import choose_model_action
-from badminton1d.dynamics import landing_position, simulate_trajectory, validate_and_clip_shot_action
-from badminton1d.opponents import DecisionContext
-from badminton1d.policy import FEASIBLE_MASK_START_INDEX, apply_hitter_action_mask, apply_receiver_action_mask
-from badminton1d.state import ShotAction, StageState
-from badminton1d.utils import opponent_side, recovery_bounds, service_target_bounds_for_receiver_state
+from badminton.agents import SafeHitter
+from badminton.config import ActionConfig, CourtConfig, SimulationConfig
+from badminton.evaluation import choose_model_action
+from badminton.dynamics import landing_position, simulate_trajectory, validate_and_clip_shot_action
+from badminton.opponents import DecisionContext
+from badminton.policy import FEASIBLE_MASK_START_INDEX, apply_hitter_action_mask, apply_receiver_action_mask
+from badminton.state import ShotAction, StageState
+from badminton.utils import opponent_side, recovery_bounds, service_target_bounds_for_receiver_state
 
 
 def _expected_clustered_angle_grid(lower: float, upper: float, center: float, count: int) -> np.ndarray:
@@ -497,7 +497,7 @@ class DiscreteActionMapperTests(unittest.TestCase):
         )
         action = ShotAction(v_x=0.9, v_y=5.8, v_z=5.0, x_rec=0.0, y_rec=-1.8)
 
-        with patch("badminton1d.dynamics.simulate_trajectory", wraps=simulate_trajectory) as mocked_simulate:
+        with patch("badminton.dynamics.simulate_trajectory", wraps=simulate_trajectory) as mocked_simulate:
             mapper.decode_hitter(0, state)
             self.assertEqual(mocked_simulate.call_count, 0)
 

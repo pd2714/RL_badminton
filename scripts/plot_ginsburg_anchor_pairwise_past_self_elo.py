@@ -19,7 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.elo import PairwiseRecord, calculate_elo
+from badminton.elo import PairwiseRecord, calculate_elo
 
 
 DEFAULT_INPUT_ROOT = REPO_ROOT / "outputs/rl/ginsburg_20260622"

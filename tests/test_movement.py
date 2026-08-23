@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from badminton1d.config import PlayerConfig, SimulationConfig
-from badminton1d.movement import (
+from badminton.config import PlayerConfig, SimulationConfig
+from badminton.movement import (
     advance_player_during_reaction,
     advance_player_toward,
     brake_start_time,

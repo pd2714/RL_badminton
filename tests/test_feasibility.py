@@ -4,10 +4,10 @@ import unittest
 
 import numpy as np
 
-from badminton1d.config import PlayerConfig, SimulationConfig
-from badminton1d.dynamics import candidate_intercept_points, feasible_intercept_indices
-from badminton1d.state import ShotAction, StageState
-from badminton1d.utils import move_toward
+from badminton.config import PlayerConfig, SimulationConfig
+from badminton.dynamics import candidate_intercept_points, feasible_intercept_indices
+from badminton.state import ShotAction, StageState
+from badminton.utils import move_toward
 
 
 class FeasibilityTests(unittest.TestCase):

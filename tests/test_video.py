@@ -8,11 +8,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import feasible_intercept_indices, step_stage
-from badminton1d.playback import build_rally_trace
-from badminton1d.state import ShotAction, StageState
-from badminton1d.video import (
+from badminton.config import SimulationConfig
+from badminton.dynamics import feasible_intercept_indices, step_stage
+from badminton.playback import build_rally_trace
+from badminton.state import ShotAction, StageState
+from badminton.video import (
     TrainingProgressSample,
     _draw_backline_markers_side_view,
     _draw_service_markers_side_view,

@@ -14,16 +14,16 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.eval_evolution import (
+from badminton.eval_evolution import (
     LANDING_ZONE_NAMES,
     SHOT_TYPE_ORDER,
     build_sim_config,
     landing_zone_name,
     load_run_config,
 )
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
-from badminton1d.state import Side
-from badminton1d.utils import ensure_directory, opponent_side
+from badminton.mpl_config import ensure_writable_matplotlib_config
+from badminton.state import Side
+from badminton.utils import ensure_directory, opponent_side
 
 
 DEFAULT_POSITION_DIR = "opponent_default_position"

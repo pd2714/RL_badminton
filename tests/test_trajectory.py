@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import unittest
 
-from badminton1d.config import ActionConfig, SimulationConfig
-from badminton1d.dynamics import candidate_intercept_points, feasible_intercept_indices, trajectory_result, valid_hitter_action
-from badminton1d.state import ShotAction, StageState
-from badminton1d.trajectory import (
+from badminton.config import ActionConfig, SimulationConfig
+from badminton.dynamics import candidate_intercept_points, feasible_intercept_indices, trajectory_result, valid_hitter_action
+from badminton.state import ShotAction, StageState
+from badminton.trajectory import (
     ballistic_landing_time,
     ballistic_net_crossing,
     ballistic_position,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from badminton1d.elo import PairwiseRecord, calculate_elo, expected_score
+from badminton.elo import PairwiseRecord, calculate_elo, expected_score
 
 
 class EloTests(unittest.TestCase):

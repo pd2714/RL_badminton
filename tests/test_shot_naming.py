@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from badminton1d.config import SimulationConfig
-from badminton1d.shot_generators import name_velocity_shot
+from badminton.config import SimulationConfig
+from badminton.shot_generators import name_velocity_shot
 
 
 class VelocityShotNamingTests(unittest.TestCase):

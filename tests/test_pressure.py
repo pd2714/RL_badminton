@@ -4,8 +4,8 @@ import unittest
 
 import numpy as np
 
-from badminton1d.config import PlayerConfig, SimulationConfig
-from badminton1d.pressure import ShotPressureWeights, shot_pressure_from_candidates
+from badminton.config import PlayerConfig, SimulationConfig
+from badminton.pressure import ShotPressureWeights, shot_pressure_from_candidates
 
 
 class ShotPressureTests(unittest.TestCase):

@@ -5,13 +5,13 @@ import unittest
 
 import numpy as np
 
-from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import landing_position
-from badminton1d.eval_evolution import summarize_match_trace_metrics
-from badminton1d.evaluation import recovery_intended_landing_metrics, summarize_episodes
-from badminton1d.playback import MatchTrace, RallyTrace, build_rally_trace
-from badminton1d.state import ShotAction, StageRecord, StageState, ValidatedShotAction
-from badminton1d.trajectory import ballistic_landing_time
+from badminton.config import SimulationConfig
+from badminton.dynamics import landing_position
+from badminton.eval_evolution import summarize_match_trace_metrics
+from badminton.evaluation import recovery_intended_landing_metrics, summarize_episodes
+from badminton.playback import MatchTrace, RallyTrace, build_rally_trace
+from badminton.state import ShotAction, StageRecord, StageState, ValidatedShotAction
+from badminton.trajectory import ballistic_landing_time
 
 
 def _record_for_landing(

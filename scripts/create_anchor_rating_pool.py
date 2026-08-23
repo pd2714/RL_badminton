@@ -10,8 +10,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.eval_evolution import checkpoint_step, discover_anchor_checkpoints, filter_anchor_checkpoints
-from badminton1d.utils import ensure_directory
+from badminton.eval_evolution import checkpoint_step, discover_anchor_checkpoints, filter_anchor_checkpoints
+from badminton.utils import ensure_directory
 
 
 def parse_args() -> argparse.Namespace:

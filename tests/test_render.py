@@ -6,11 +6,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import FancyArrowPatch
 
-from badminton1d.config import CourtConfig, SimulationConfig
-from badminton1d.render import _stage_title, draw_players, render_stage_image, setup_court_axes, stage_colors
-from badminton1d.state import ShotAction, StageState
-from badminton1d.dynamics import feasible_intercept_indices, step_stage
-from badminton1d.trajectory import ballistic_landing_time
+from badminton.config import CourtConfig, SimulationConfig
+from badminton.render import _stage_title, draw_players, render_stage_image, setup_court_axes, stage_colors
+from badminton.state import ShotAction, StageState
+from badminton.dynamics import feasible_intercept_indices, step_stage
+from badminton.trajectory import ballistic_landing_time
 
 
 class RenderTests(unittest.TestCase):

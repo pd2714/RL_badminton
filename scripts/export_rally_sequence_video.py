@@ -13,17 +13,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.action_space import DiscreteActionConfig
-from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
-from badminton1d.opponents import make_opponent
-from badminton1d.playback import MatchTrace, RallyTrace, build_rally_trace
-from badminton1d.rl_env import BadmintonRLEnv
-from badminton1d.evaluation import choose_model_action
-from badminton1d.selfplay import CheckpointPool, FixedCheckpointOpponent, LiveModelOpponent, build_selfplay_env
-from badminton1d.shot_generators import TacticRuntimeConfig
-from badminton1d.state import Side
-from badminton1d.utils import ensure_directory
-from badminton1d.video import VideoExportResult, export_match_video
+from badminton.action_space import DiscreteActionConfig
+from badminton.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
+from badminton.opponents import make_opponent
+from badminton.playback import MatchTrace, RallyTrace, build_rally_trace
+from badminton.rl_env import BadmintonRLEnv
+from badminton.evaluation import choose_model_action
+from badminton.selfplay import CheckpointPool, FixedCheckpointOpponent, LiveModelOpponent, build_selfplay_env
+from badminton.shot_generators import TacticRuntimeConfig
+from badminton.state import Side
+from badminton.utils import ensure_directory
+from badminton.video import VideoExportResult, export_match_video
 
 
 def parse_args() -> argparse.Namespace:

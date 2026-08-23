@@ -8,7 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.eval_evolution import AnchorEvaluationConfig, evaluate_anchor_folder
+from badminton.eval_evolution import AnchorEvaluationConfig, evaluate_anchor_folder
 
 
 def parse_args() -> argparse.Namespace:

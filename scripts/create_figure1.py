@@ -10,7 +10,7 @@ if str(REPO_ROOT) not in sys.path:
 
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "6a19f5382c36b7ba5e5cf0b1" / "figures" / "figure1"
 
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
+from badminton.mpl_config import ensure_writable_matplotlib_config
 
 ensure_writable_matplotlib_config()
 
@@ -22,8 +22,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.patches import Arc, FancyArrowPatch, Rectangle
 
-from badminton1d.config import ActionConfig, CourtConfig, SimulationConfig
-from badminton1d.render import (
+from badminton.config import ActionConfig, CourtConfig, SimulationConfig
+from badminton.render import (
     GROUND_MARKER_Z,
     OFFICIAL_DOUBLES_WIDTH,
     OFFICIAL_LONG_SERVICE_DOUBLES_FROM_BACK,
@@ -33,7 +33,7 @@ from badminton1d.render import (
     setup_3d_court_axes,
     stage_colors,
 )
-from badminton1d.trajectory import simulate_trajectory
+from badminton.trajectory import simulate_trajectory
 
 
 ACCENT_BLUE = "#2563eb"

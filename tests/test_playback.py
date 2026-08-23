@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from badminton1d.config import PlayerConfig, SimulationConfig
-from badminton1d.dynamics import effective_flight_time, feasible_intercept_indices, landing_position, step_stage
-from badminton1d.movement import advance_player_toward, intercept_body_target_after_reaction
-from badminton1d.playback import build_rally_trace, interpolate_stage
-from badminton1d.state import ShotAction, StageState
+from badminton.config import PlayerConfig, SimulationConfig
+from badminton.dynamics import effective_flight_time, feasible_intercept_indices, landing_position, step_stage
+from badminton.movement import advance_player_toward, intercept_body_target_after_reaction
+from badminton.playback import build_rally_trace, interpolate_stage
+from badminton.state import ShotAction, StageState
 
 
 class PlaybackTests(unittest.TestCase):

@@ -8,19 +8,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
+from badminton.mpl_config import ensure_writable_matplotlib_config
 
 ensure_writable_matplotlib_config()
 
 import matplotlib
 import numpy as np
 
-from badminton1d.config import ActionConfig, CourtConfig, SimulationConfig
-from badminton1d.shot_generators import TacticAction1D, TacticLookup1D, TacticRuntimeConfig
-from badminton1d.shot_generators.tactic_lookup_common import ANGLE_BIN_COUNT_1D, angle_bin_centers_deg_1d
-from badminton1d.state import ShotAction, StageState
-from badminton1d.trajectory import simulate_trajectory
-from badminton1d.utils import side_y_bounds
+from badminton.config import ActionConfig, CourtConfig, SimulationConfig
+from badminton.shot_generators import TacticAction1D, TacticLookup1D, TacticRuntimeConfig
+from badminton.shot_generators.tactic_lookup_common import ANGLE_BIN_COUNT_1D, angle_bin_centers_deg_1d
+from badminton.state import ShotAction, StageState
+from badminton.trajectory import simulate_trajectory
+from badminton.utils import side_y_bounds
 
 
 def configure_interactive_backend() -> None:

@@ -14,9 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.state import Side
-from badminton1d.utils import ensure_directory
-from badminton1d.video import export_match_video
+from badminton.state import Side
+from badminton.utils import ensure_directory
+from badminton.video import export_match_video
 from scripts.evaluate_recovery_ablation_fixed_pool import (
     PoolOpponentSpec,
     RecoveryAgentSpec,

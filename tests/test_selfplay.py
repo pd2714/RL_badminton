@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from badminton1d.selfplay import CheckpointPool, SelfPlayEvalCallback
+from badminton.selfplay import CheckpointPool, SelfPlayEvalCallback
 
 
 class CheckpointPoolTests(unittest.TestCase):
@@ -80,7 +80,7 @@ class CheckpointPoolTests(unittest.TestCase):
             )
             second_resolved = second.resolve()
 
-            with patch("badminton1d.selfplay.PPO.load", side_effect=[object(), object()]):
+            with patch("badminton.selfplay.PPO.load", side_effect=[object(), object()]):
                 pool.load_model(first)
                 pool.load_model(second)
 
@@ -106,8 +106,8 @@ class CheckpointPoolTests(unittest.TestCase):
                 'Unexpected key(s) in state_dict: "action_net.weight".'
             )
             with (
-                patch("badminton1d.selfplay.PPO.load", side_effect=load_error),
-                patch("badminton1d.selfplay._load_ppo_with_compatible_policy_state", return_value=loaded_model),
+                patch("badminton.selfplay.PPO.load", side_effect=load_error),
+                patch("badminton.selfplay._load_ppo_with_compatible_policy_state", return_value=loaded_model),
             ):
                 self.assertIs(pool.load_model(checkpoint), loaded_model)
 

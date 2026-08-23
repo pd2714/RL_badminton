@@ -15,8 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.action_space import DiscreteActionMapper
-from badminton1d.eval_evolution import (
+from badminton.action_space import DiscreteActionMapper
+from badminton.eval_evolution import (
     LANDING_ZONE_NAMES,
     SHOT_TYPE_ORDER,
     build_discrete_action_config,
@@ -28,10 +28,10 @@ from badminton1d.eval_evolution import (
     load_anchor_model,
     load_run_config,
 )
-from badminton1d.obs import ObservationConfig, ObservationEncoder
-from badminton1d.pressure import shot_pressure_from_record
-from badminton1d.state import Side
-from badminton1d.utils import ensure_directory, opponent_side
+from badminton.obs import ObservationConfig, ObservationEncoder
+from badminton.pressure import shot_pressure_from_record
+from badminton.state import Side
+from badminton.utils import ensure_directory, opponent_side
 
 from scripts.evaluate_controlled_lift_probe import (
     ProbeScenario,

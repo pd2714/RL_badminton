@@ -13,13 +13,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.agents import GreedyReceiver, RandomValidHitter, StageAgent
-from badminton1d.config import SimulationConfig
-from badminton1d.dynamics import feasible_intercept_indices, validate_and_clip_shot_action
-from badminton1d.env import Badminton1DEnv
-from badminton1d.render import render_stage_image
-from badminton1d.state import Side, StageRecord, StageState
-from badminton1d.utils import ensure_directory, recovery_bounds
+from badminton.agents import GreedyReceiver, RandomValidHitter, StageAgent
+from badminton.config import SimulationConfig
+from badminton.dynamics import feasible_intercept_indices, validate_and_clip_shot_action
+from badminton.env import Badminton1DEnv
+from badminton.render import render_stage_image
+from badminton.state import Side, StageRecord, StageState
+from badminton.utils import ensure_directory, recovery_bounds
 
 DEFAULT_OUTPUT_DIR = Path("outputs/rollout_videos")
 UINT32_MAX_EXCLUSIVE = 2**32

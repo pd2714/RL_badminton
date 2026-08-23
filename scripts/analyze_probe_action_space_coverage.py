@@ -14,8 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.mpl_config import ensure_writable_matplotlib_config
-from badminton1d.utils import ensure_directory
+from badminton.mpl_config import ensure_writable_matplotlib_config
+from badminton.utils import ensure_directory
 
 ensure_writable_matplotlib_config()
 import matplotlib.pyplot as plt

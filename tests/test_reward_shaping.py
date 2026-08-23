@@ -4,9 +4,9 @@ import unittest
 
 import numpy as np
 
-from badminton1d.config import SimulationConfig
-from badminton1d.pressure import shot_pressure_from_record
-from badminton1d.reward_shaping import (
+from badminton.config import SimulationConfig
+from badminton.pressure import shot_pressure_from_record
+from badminton.reward_shaping import (
     AttackRewardConfig,
     DefensiveLiftRewardConfig,
     attack_reward_from_record,
@@ -17,8 +17,8 @@ from badminton1d.reward_shaping import (
     pressure_reward_from_record,
     return_depth_reward_from_record,
 )
-from badminton1d.state import ShotAction, StageRecord, StageState, ValidatedShotAction
-from badminton1d.trajectory import ballistic_landing_time
+from badminton.state import ShotAction, StageRecord, StageState, ValidatedShotAction
+from badminton.trajectory import ballistic_landing_time
 
 
 def make_record(

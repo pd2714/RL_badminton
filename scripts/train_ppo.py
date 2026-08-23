@@ -16,22 +16,22 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from badminton1d.action_space import DiscreteActionConfig
-from badminton1d.callbacks import EntropyScheduleCallback, RallyDiagnosticsCallback, SafeWinRateEvalCallback
-from badminton1d.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
-from badminton1d.factorized_ppo import RecoveryFactorizedPPO
-from badminton1d.policy import CONTINUOUS_LOG_STD_MAX, CONTINUOUS_LOG_STD_MIN, MaskedBadmintonPolicy
-from badminton1d.reset_sampling import ResetSamplingConfig
-from badminton1d.reward_shaping import AttackRewardConfig, LoopPenaltyConfig, PressureRewardConfig
-from badminton1d.rl_env import (
+from badminton.action_space import DiscreteActionConfig
+from badminton.callbacks import EntropyScheduleCallback, RallyDiagnosticsCallback, SafeWinRateEvalCallback
+from badminton.config import ActionConfig, CourtConfig, PlayerConfig, SimulationConfig
+from badminton.factorized_ppo import RecoveryFactorizedPPO
+from badminton.policy import CONTINUOUS_LOG_STD_MAX, CONTINUOUS_LOG_STD_MIN, MaskedBadmintonPolicy
+from badminton.reset_sampling import ResetSamplingConfig
+from badminton.reward_shaping import AttackRewardConfig, LoopPenaltyConfig, PressureRewardConfig
+from badminton.rl_env import (
     COUNTERFACTUAL_OPPONENT_RESPONSE_SAMPLES,
     RECOVERY_COUNTERFACTUAL_OTHER_SAMPLE_COUNT,
     BadmintonRLEnv,
     RLEnvConfig,
     RewardConfig,
 )
-from badminton1d.shot_generators import TacticRuntimeConfig
-from badminton1d.utils import ensure_directory
+from badminton.shot_generators import TacticRuntimeConfig
+from badminton.utils import ensure_directory
 
 
 def _flag_was_provided(argv: list[str], flag: str) -> bool:

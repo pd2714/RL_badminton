@@ -6,15 +6,15 @@ from unittest.mock import patch
 import numpy as np
 import torch as th
 
-from badminton1d.callbacks import SafeWinRateEvalCallback
-from badminton1d.action_space import DiscreteActionConfig
-from badminton1d.config import SimulationConfig
-from badminton1d.factorized_ppo import RecoveryFactorizedPPO, RecoveryFactorizedRolloutBuffer
-from badminton1d.policy import CONTINUOUS_LOG_STD_MAX, CONTINUOUS_LOG_STD_MIN, MaskedBadmintonPolicy
-from badminton1d.rl_env import BadmintonRLEnv, RLEnvConfig
-from badminton1d.shot_cf import ShotCFCandidate, select_diverse_shot_candidates
-from badminton1d.state import ShotAction
-from badminton1d.selfplay import FrozenCheckpointOpponent, LiveModelOpponent, MixedCheckpointOpponent, SelfPlayProgressVideoCallback
+from badminton.callbacks import SafeWinRateEvalCallback
+from badminton.action_space import DiscreteActionConfig
+from badminton.config import SimulationConfig
+from badminton.factorized_ppo import RecoveryFactorizedPPO, RecoveryFactorizedRolloutBuffer
+from badminton.policy import CONTINUOUS_LOG_STD_MAX, CONTINUOUS_LOG_STD_MIN, MaskedBadmintonPolicy
+from badminton.rl_env import BadmintonRLEnv, RLEnvConfig
+from badminton.shot_cf import ShotCFCandidate, select_diverse_shot_candidates
+from badminton.state import ShotAction
+from badminton.selfplay import FrozenCheckpointOpponent, LiveModelOpponent, MixedCheckpointOpponent, SelfPlayProgressVideoCallback
 from scripts import train_ppo, train_selfplay
 
 
