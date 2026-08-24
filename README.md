@@ -13,6 +13,12 @@ frozen-checkpoint evaluation, controlled tactical probes, human-data sanity
 checks, ablations, rendering, and figure-generation code used by the current
 paper, **“ShuttleArena: Interpretable Self-Play in Physics-Based Badminton.”**
 
+## Illustrative video
+
+This illustrative video shows learned tactics.
+
+https://github.com/user-attachments/assets/42a290c8-55d0-48da-8a1c-75aefa7c2b11
+
 ## How ShuttleArena works
 
 ```mermaid
