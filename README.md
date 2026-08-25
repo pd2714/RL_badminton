@@ -17,6 +17,13 @@ paper, **“ShuttleArena: Interpretable Self-Play in Physics-Based Badminton.”
 
 This illustrative video shows learned tactics.
 
+To read the video, the blue and pink figures are the left- and right-side
+agents. The red dot is the moving shuttle and the dashed red curve is its shot
+trajectory; the white ground marker shows the projected landing point, the
+purple marker the hitter's chosen recovery target, and the yellow marker the
+receiver's intended interception point. The overlay names the current hitter
+and shot type.
+
 https://github.com/user-attachments/assets/42a290c8-55d0-48da-8a1c-75aefa7c2b11
 
 ## How ShuttleArena works
