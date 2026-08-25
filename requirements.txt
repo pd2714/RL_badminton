@@ -1,6 +1,6 @@
-numpy
-matplotlib
-imageio
-gymnasium
-stable-baselines3
-tensorboard
+numpy==2.0.2
+matplotlib==3.9.4
+imageio==2.37.2
+gymnasium==1.1.1
+stable-baselines3==2.7.1
+tensorboard==2.20.0

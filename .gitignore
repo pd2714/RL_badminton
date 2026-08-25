@@ -7,3 +7,8 @@ screenlog.*
 figure1.pdf
 figure1.png
 6a19f5382c36b7ba5e5cf0b1/
+.mplconfig/
+output/
+tmp/
+external/
+AuthorKit24-4.zip
